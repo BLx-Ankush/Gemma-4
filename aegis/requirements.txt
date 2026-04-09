@@ -1,0 +1,10 @@
+faster-whisper==1.1.0
+pyttsx3==2.98
+flask==3.1.0
+flask-cors==5.0.0
+psutil==6.1.0
+requests==2.32.3
+numpy==2.2.0
+Pillow==11.1.0
+pytest==8.3.4
+tqdm==4.67.1

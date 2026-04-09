@@ -1,0 +1,16 @@
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Test/tool cache
+.pytest_cache/
+
+# Local runtime artifacts
+aegis/data/uploads/
+
+# Local model binaries and executables
+aegis/models/

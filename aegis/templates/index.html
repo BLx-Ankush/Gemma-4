@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AEGIS - Medical First-Response Assistant</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="bg-orb orb-a"></div>
+  <div class="bg-orb orb-b"></div>
+  <div class="bg-grid"></div>
+
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow">Offline-First Triage Assistant</p>
+      <h1>AEGIS</h1>
+      <p class="subtitle">Text, image, and voice guidance with a built-in safety audit layer.</p>
+      <div class="pill-row">
+        <span id="mode-pill" class="pill">Mode: checking</span>
+        <span id="model-pill" class="pill">Model: loading</span>
+      </div>
+    </header>
+
+    <section class="panel reveal">
+      <h2>Text + Image Query</h2>
+      <form id="query-form" class="stack">
+        <label>
+          <span>What happened?</span>
+          <textarea id="query-text" name="text" rows="4" placeholder="Example: I burned my hand while cooking. What should I do now?" required></textarea>
+        </label>
+
+        <div class="row">
+          <label>
+            <span>Language</span>
+            <select id="query-language" name="language">
+              <option>English</option>
+              <option>Hindi</option>
+              <option>Tamil</option>
+              <option>Spanish</option>
+              <option>French</option>
+              <option>Swahili</option>
+              <option>Arabic</option>
+            </select>
+          </label>
+          <label>
+            <span>Optional image</span>
+            <input id="query-image" name="image" type="file" accept="image/*" />
+          </label>
+        </div>
+
+        <button id="query-submit" type="submit">Get Medical Guidance</button>
+      </form>
+    </section>
+
+    <section class="panel reveal">
+      <h2>Voice Session</h2>
+      <div class="voice-toolbar">
+        <button id="start-session" type="button">Start Session</button>
+        <button id="end-session" type="button" class="ghost">End Session</button>
+        <span id="session-id" class="small-note">No active voice session</span>
+      </div>
+
+      <div class="voice-row">
+        <button id="record-toggle" type="button" disabled>Start Recording</button>
+        <label>
+          <span>Voice language</span>
+          <select id="voice-language">
+            <option>English</option>
+            <option>Hindi</option>
+            <option>Tamil</option>
+            <option>Spanish</option>
+            <option>French</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="small-note">Tip: voice mode records one turn, sends it to backend, and appends response to history.</p>
+    </section>
+
+    <section class="panel reveal">
+      <h2>Response</h2>
+      <div id="response-box" class="response-box">No response yet.</div>
+      <audio id="response-audio" controls hidden></audio>
+      <div id="meta-box" class="meta-box"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2>Voice History</h2>
+      <div id="history-box" class="history-box">Session history will appear here.</div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
