@@ -11,7 +11,7 @@ import requests
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "gemma4-e2b.gguf")
 MMPROJ_PATH = os.path.join(MODEL_DIR, "mmproj-gemma4-e2b.gguf")
-MAX_TOKENS = int(os.environ.get("AEGIS_MAX_TOKENS", "96"))
+MAX_TOKENS = 512
 TEMPERATURE = 0.3
 
 _last_backend = "none"
@@ -107,11 +107,11 @@ def _extract_completion_text(payload: Dict[str, Any]) -> str:
 
 
 def _get_local_config() -> Dict[str, Any]:
-    timeout_raw = os.environ.get("AEGIS_LOCAL_TIMEOUT_SEC", "35")
+    timeout_raw = os.environ.get("AEGIS_LOCAL_TIMEOUT_SEC", "25")
     try:
         timeout = float(timeout_raw)
     except ValueError:
-        timeout = 35.0
+        timeout = 25.0
 
     base_url = os.environ.get("AEGIS_LOCAL_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
     return {
@@ -120,7 +120,7 @@ def _get_local_config() -> Dict[str, Any]:
         "chat_path": os.environ.get("AEGIS_LOCAL_CHAT_PATH", "/v1/chat/completions"),
         "completion_path": os.environ.get("AEGIS_LOCAL_COMPLETION_PATH", "/completion"),
         "model_label": os.environ.get("AEGIS_LOCAL_MODEL_LABEL", "gemma4-e2b-turboquant"),
-        "timeout": max(1.0, min(timeout, 45.0)),
+        "timeout": max(1.0, timeout),
     }
 
 
@@ -134,10 +134,10 @@ def _get_cloud_config() -> Dict[str, Any]:
     return {
         "api_url": os.environ.get(
             "AEGIS_CLOUD_API_URL",
-            "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemma-3-27b-it:generateContent",
         ).strip(),
         "api_key": os.environ.get("AEGIS_CLOUD_API_KEY", "").strip(),
-        "model_label": os.environ.get("AEGIS_CLOUD_MODEL_LABEL", "gemma-4-31b-cloud").strip(),
+        "model_label": os.environ.get("AEGIS_CLOUD_MODEL_LABEL", "gemma-27b-cloud").strip(),
         "timeout": max(1.0, timeout),
     }
 
@@ -194,19 +194,11 @@ def load_model() -> Dict[str, Any]:
     }
 
 
-def _infer_local(
-    system_prompt: str,
-    user_message: str,
-    image_path: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-) -> str:
+def _infer_local(system_prompt: str, user_message: str, image_path: Optional[str] = None) -> str:
     global _last_backend
 
     config = _get_local_config()
     timeout = config["timeout"]
-
-    token_budget = int(max_tokens) if max_tokens else MAX_TOKENS
-    token_budget = max(32, min(token_budget, 128))
 
     chat_payload: Dict[str, Any] = {
         "model": config["model_label"],
@@ -215,7 +207,7 @@ def _infer_local(
             {"role": "user", "content": user_message},
         ],
         "temperature": TEMPERATURE,
-        "max_tokens": token_budget,
+        "max_tokens": MAX_TOKENS,
         "stream": False,
     }
 
@@ -242,10 +234,6 @@ def _infer_local(
         text = _extract_chat_text(payload)
         _last_backend = "local_llama_server"
         return text
-    except requests.exceptions.Timeout as exc:
-        raise RuntimeError("Local chat endpoint timed out") from exc
-    except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError("Local chat endpoint is unreachable") from exc
     except Exception as exc:
         chat_error = exc
 
@@ -259,7 +247,7 @@ def _infer_local(
     completion_payload = {
         "prompt": _build_text_prompt(system_prompt, completion_message),
         "temperature": TEMPERATURE,
-        "n_predict": token_budget,
+        "n_predict": MAX_TOKENS,
         "stop": ["<end_of_turn>"],
         "stream": False,
     }
@@ -302,15 +290,7 @@ def _extract_cloud_text(payload: Dict[str, Any]) -> str:
     raise RuntimeError("Cloud API response did not contain readable text.")
 
 
-def _infer_cloud(
-    system_prompt: str,
-    user_message: str,
-    image_path: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-) -> str:
-    token_budget = int(max_tokens) if max_tokens else MAX_TOKENS
-    token_budget = max(32, min(token_budget, 128))
-
+def _infer_cloud(system_prompt: str, user_message: str, image_path: Optional[str] = None) -> str:
     global _last_backend
 
     config = _get_cloud_config()
@@ -353,7 +333,7 @@ def _infer_cloud(
         ],
         "generationConfig": {
             "temperature": TEMPERATURE,
-            "maxOutputTokens": token_budget,
+            "maxOutputTokens": MAX_TOKENS,
         },
     }
 
@@ -371,33 +351,14 @@ def _infer_cloud(
     return result_text
 
 
-def infer(
-    system_prompt: str,
-    user_message: str,
-    image_path: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-    force_cloud: bool = False,
-) -> InferResult:
-    """
-    max_tokens: Optional override for generation budget.
-    force_cloud: If True, attempt cloud path regardless of router mode.
-    """
+def infer(system_prompt: str, user_message: str, image_path: Optional[str] = None) -> InferResult:
     start_time = time.time()
-    effective_tokens = int(max_tokens) if max_tokens else MAX_TOKENS
-    effective_tokens = max(32, min(effective_tokens, 128))
     status = compute_router.get_status()
     has_vision = bool(image_path and os.path.exists(image_path or ""))
-    online_cloud_mode = status["mode"] == "online" and _cloud_is_configured()
-    allow_local_fallback_online = os.environ.get("AEGIS_ONLINE_FALLBACK_TO_LOCAL", "0").strip() == "1"
 
-    if force_cloud or online_cloud_mode:
+    if status["mode"] == "online" and _cloud_is_configured():
         try:
-            response_text = _infer_cloud(
-                system_prompt,
-                user_message,
-                image_path,
-                max_tokens=effective_tokens,
-            )
+            response_text = _infer_cloud(system_prompt, user_message, image_path)
             return InferResult(
                 response=response_text.strip(),
                 model_used=_get_cloud_config()["model_label"],
@@ -406,26 +367,12 @@ def infer(
                 has_vision=has_vision,
             )
         except Exception as exc:
-            if force_cloud:
-                raise RuntimeError(f"Cloud inference failed in force_cloud mode: {exc}") from exc
-
-            if online_cloud_mode and not allow_local_fallback_online:
-                raise RuntimeError(
-                    "Cloud inference failed and online local fallback is disabled. "
-                    f"Set AEGIS_ONLINE_FALLBACK_TO_LOCAL=1 to allow local fallback. Root cause: {exc}"
-                ) from exc
-
-            print(f"[gemma_core] Cloud failed ({exc}), falling back to local.")
+            print(f"Warning: cloud inference failed; falling back to local llama-server. Error: {exc}")
 
     if status["mode"] == "online" and not _cloud_is_configured():
         print("Warning: online mode detected but cloud API is not configured. Using local llama-server.")
 
-    response_text = _infer_local(
-        system_prompt,
-        user_message,
-        image_path,
-        max_tokens=effective_tokens,
-    )
+    response_text = _infer_local(system_prompt, user_message, image_path)
     return InferResult(
         response=response_text.strip(),
         model_used=_get_local_config()["model_label"],

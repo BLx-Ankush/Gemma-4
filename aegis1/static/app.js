@@ -12,18 +12,6 @@
 
 "use strict";
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.getRegistrations().then((registrations) => {
-      registrations.forEach((registration) => {
-        registration.unregister();
-      });
-    }).catch(() => {
-      // Ignore failures; app continues without service worker support.
-    });
-  });
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM refs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,14 +84,6 @@ const btnRefreshLog    = $("btn-refresh-log");
 // Spinner
 const spinner    = $("spinner");
 const spinnerMsg = $("spinner-msg");
-const spinnerElapsed = $("spinner-elapsed");
-const spinnerCancel = $("spinner-cancel");
-const REQUEST_TIMEOUT_MS = 70000;
-let spinnerHintTimer = null;
-let spinnerFailSafeTimer = null;
-let spinnerElapsedTimer = null;
-let spinnerStartedAtMs = 0;
-let activeRequestController = null;
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,100 +114,9 @@ tabs.forEach((tab) => {
 function showSpinner(msg = "Processing…") {
   spinnerMsg.textContent = msg;
   spinner.hidden = false;
-  spinnerStartedAtMs = Date.now();
-
-  if (spinnerElapsed) {
-    spinnerElapsed.hidden = false;
-    spinnerElapsed.textContent = "Elapsed: 0s";
-  }
-
-  if (spinnerCancel) {
-    spinnerCancel.disabled = false;
-  }
-
-  if (spinnerHintTimer) {
-    clearTimeout(spinnerHintTimer);
-  }
-  if (spinnerFailSafeTimer) {
-    clearTimeout(spinnerFailSafeTimer);
-  }
-  if (spinnerElapsedTimer) {
-    clearInterval(spinnerElapsedTimer);
-  }
-
-  spinnerElapsedTimer = setInterval(() => {
-    if (spinner.hidden) {
-      return;
-    }
-    const elapsedSec = Math.max(0, Math.floor((Date.now() - spinnerStartedAtMs) / 1000));
-    if (spinnerElapsed) {
-      spinnerElapsed.textContent = `Elapsed: ${elapsedSec}s`;
-    }
-  }, 1000);
-
-  spinnerHintTimer = setTimeout(() => {
-    if (!spinner.hidden) {
-      spinnerMsg.textContent = "Still processing on local model… request will auto-timeout if it takes too long.";
-    }
-  }, 10000);
-  spinnerFailSafeTimer = setTimeout(() => {
-    if (!spinner.hidden) {
-      abortActiveRequest("Request cancelled automatically to keep the app responsive.");
-    }
-  }, REQUEST_TIMEOUT_MS + 3000);
 }
-
-function abortActiveRequest(message) {
-  if (activeRequestController) {
-    activeRequestController.abort();
-    activeRequestController = null;
-  }
-  if (message) {
-    spinnerMsg.textContent = message;
-  }
-  hideSpinner();
-}
-
 function hideSpinner() {
   spinner.hidden = true;
-  if (spinnerHintTimer) {
-    clearTimeout(spinnerHintTimer);
-    spinnerHintTimer = null;
-  }
-  if (spinnerFailSafeTimer) {
-    clearTimeout(spinnerFailSafeTimer);
-    spinnerFailSafeTimer = null;
-  }
-  if (spinnerElapsedTimer) {
-    clearInterval(spinnerElapsedTimer);
-    spinnerElapsedTimer = null;
-  }
-  if (spinnerElapsed) {
-    spinnerElapsed.hidden = true;
-  }
-  if (spinnerCancel) {
-    spinnerCancel.disabled = true;
-  }
-}
-
-if (spinnerCancel) {
-  spinnerCancel.addEventListener("click", () => {
-    abortActiveRequest("Request cancelled.");
-  });
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  activeRequestController = controller;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-    if (activeRequestController === controller) {
-      activeRequestController = null;
-    }
-  }
 }
 
 
@@ -334,7 +223,7 @@ vedaForm.addEventListener("submit", async (e) => {
     fd.append("language", vedaLanguage.value);
     if (vedaImage.files[0]) fd.append("image", vedaImage.files[0]);
 
-    const res  = await fetchWithTimeout("/veda", { method: "POST", body: fd });
+    const res  = await fetch("/veda", { method: "POST", body: fd });
     const data = await res.json();
 
     if (!data.ok) throw new Error(data.error || "Request failed");
@@ -373,11 +262,7 @@ vedaForm.addEventListener("submit", async (e) => {
     vedaResponseArea.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
   } catch (err) {
-    if (err && err.name === "AbortError") {
-      vedaResponseText.textContent = "Error: Request timed out after 70s. Please retry.";
-    } else {
-      vedaResponseText.textContent = "Error: " + err.message;
-    }
+    vedaResponseText.textContent = "Error: " + err.message;
     vedaMirrorPanel.hidden = true;
     vedaResponseArea.hidden = false;
   } finally {
@@ -541,7 +426,7 @@ async function sendVoiceTurn(blob) {
   fd.append("audio", blob, "turn.webm");
 
   try {
-    const res  = await fetchWithTimeout("/voice", { method: "POST", body: fd });
+    const res  = await fetch("/voice", { method: "POST", body: fd });
     const data = await res.json();
 
     if (!data.ok) throw new Error(data.error || "Voice query failed");
@@ -586,11 +471,7 @@ async function sendVoiceTurn(blob) {
     await refreshHistory();
 
   } catch (err) {
-    if (err && err.name === "AbortError") {
-      voiceResponseText.textContent = "Error: Voice request timed out after 70s. Please retry.";
-    } else {
-      voiceResponseText.textContent = "Error: " + err.message;
-    }
+    voiceResponseText.textContent = "Error: " + err.message;
     voiceResponseArea.hidden = false;
   } finally {
     hideSpinner();

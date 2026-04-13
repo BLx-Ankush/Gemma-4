@@ -102,7 +102,7 @@ def test_route_aliases_status_veda_and_mirror_log(monkeypatch):
     app.config.update(TESTING=True)
     client = app.test_client()
 
-    monkeypatch.setattr("aegis.app.compute_router.force_refresh", lambda: {"mode": "offline", "ram_gb": 8.0, "is_online": False})
+    monkeypatch.setattr("aegis.app.compute_router.refresh", lambda: {"mode": "offline", "ram_gb": 8.0, "is_online": False})
     monkeypatch.setattr("aegis.app.gemma_core.get_model_info", lambda: {"loaded": True, "active_backend": "local"})
 
     fake_report = mirror.MirrorReport(

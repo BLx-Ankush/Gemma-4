@@ -12,7 +12,7 @@ def _client():
 def test_health_endpoint(monkeypatch):
     client = _client()
 
-    monkeypatch.setattr("aegis.app.compute_router.force_refresh", lambda: {"mode": "offline", "ram_gb": 8.0, "is_online": False})
+    monkeypatch.setattr("aegis.app.compute_router.refresh", lambda: {"mode": "offline", "ram_gb": 8.0, "is_online": False})
     monkeypatch.setattr("aegis.app.gemma_core.get_model_info", lambda: {"loaded": False, "has_vision": True})
 
     response = client.get("/api/health")

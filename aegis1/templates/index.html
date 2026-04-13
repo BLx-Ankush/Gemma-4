@@ -7,8 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="description" content="Offline-first medical first-response AI. Works without internet." />
   <title>AEGIS — Medical First-Response AI</title>
-  <link rel="manifest" href="/manifest.json" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260411f" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 <body>
 
@@ -263,11 +262,9 @@
     <div class="spinner-box">
       <div class="spinner-ring"></div>
       <p id="spinner-msg">Processing&hellip;</p>
-      <p id="spinner-elapsed" class="spinner-elapsed" hidden>Elapsed: 0s</p>
-      <button type="button" class="btn-ghost btn-sm spinner-cancel" id="spinner-cancel">Cancel</button>
     </div>
   </div>
 
-  <script src="{{ url_for('static', filename='app.js') }}?v=20260411f"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

@@ -7,10 +7,8 @@ Runs on 0.0.0.0 so devices connected to the phone hotspot can reach it.
 import base64
 import os
 import uuid
-import time
 from pathlib import Path
 import argparse
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_cors import CORS
@@ -24,19 +22,6 @@ DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 IMAGE_UPLOADS_DIR = UPLOADS_DIR / "images"
 AUDIO_UPLOADS_DIR = UPLOADS_DIR / "audio"
-REQUEST_TIMEOUT_SEC = max(10, int(os.environ.get("AEGIS_REQUEST_TIMEOUT_SEC", "30")))
-_REQUEST_EXECUTOR = ThreadPoolExecutor(max_workers=4)
-APP_STARTED_AT = int(time.time())
-APP_BUILD_ID = os.environ.get("AEGIS_BUILD_ID", "2026-04-11-r2")
-
-
-def _run_with_timeout(func, timeout_sec: int):
-    future = _REQUEST_EXECUTOR.submit(func)
-    try:
-        return future.result(timeout=max(1, int(timeout_sec)))
-    except FuturesTimeout as exc:
-        future.cancel()
-        raise TimeoutError(f"Request timed out after {timeout_sec}s") from exc
 
 
 def _ensure_dirs() -> None:
@@ -81,23 +66,8 @@ def _save_image_b64(image_b64: str, directory: Path) -> str:
 
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
     CORS(app)
     _ensure_dirs()
-
-    @app.after_request
-    def add_cache_headers(response):
-        path = request.path or ""
-        if (
-            path == "/"
-            or path == "/sw.js"
-            or path == "/manifest.json"
-            or path.startswith("/static/")
-        ):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
-        return response
 
     # ── PWA manifest ──────────────────────────────────────────────────────────
     @app.route("/manifest.json")
@@ -122,18 +92,7 @@ def create_app() -> Flask:
         # Only /status triggers a real refresh; inference routes use get_status()
         compute = compute_router.force_refresh()
         model_info = gemma_core.get_model_info()
-        return jsonify(
-            {
-                "ok": True,
-                "compute": compute,
-                "model": model_info,
-                "runtime": {
-                    "build_id": APP_BUILD_ID,
-                    "pid": os.getpid(),
-                    "started_at": APP_STARTED_AT,
-                },
-            }
-        )
+        return jsonify({"ok": True, "compute": compute, "model": model_info})
 
     # ── VEDA: text + image medical query ─────────────────────────────────────
     @app.route("/api/query", methods=["POST"])
@@ -168,20 +127,12 @@ def create_app() -> Flask:
         if not text_query and not audio_path:
             return jsonify({"ok": False, "error": "Provide either 'text' or 'audio'."}), 400
 
-        timeout_sec = max(
-            10,
-            int(os.environ.get("AEGIS_VEDA_REQUEST_TIMEOUT_SEC", str(REQUEST_TIMEOUT_SEC))),
-        )
-
         try:
-            result = _run_with_timeout(
-                lambda: veda.process_medical_query(
-                    image_path=image_path,
-                    audio_path=audio_path,
-                    text_query=text_query if text_query else None,
-                    language=language,
-                ),
-                timeout_sec,
+            result = veda.process_medical_query(
+                image_path=image_path,
+                audio_path=audio_path,
+                text_query=text_query if text_query else None,
+                language=language,
             )
             return jsonify({
                 "ok": True,
@@ -202,8 +153,6 @@ def create_app() -> Flask:
                     "mode": compute_router.get_status()["mode"],
                 },
             })
-        except TimeoutError as exc:
-            return jsonify({"ok": False, "error": str(exc), "timeout": True}), 504
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 500
 
@@ -251,26 +200,16 @@ def create_app() -> Flask:
         if image_file and image_file.filename:
             image_path = _save_upload(image_file, IMAGE_UPLOADS_DIR)
 
-        timeout_sec = max(
-            10,
-            int(os.environ.get("AEGIS_VOICE_REQUEST_TIMEOUT_SEC", str(REQUEST_TIMEOUT_SEC))),
-        )
-
         try:
-            result = _run_with_timeout(
-                lambda: voice_handler.process_voice_turn(
-                    audio_path=audio_path,
-                    session_id=session_id,
-                    image_path=image_path,
-                    language=language,
-                ),
-                timeout_sec,
+            result = voice_handler.process_voice_turn(
+                audio_path=audio_path,
+                session_id=session_id,
+                image_path=image_path,
+                language=language,
             )
             result["audio_response_data_url"] = _audio_to_data_url(result.get("audio_response_path", ""))
             result["mode"] = compute_router.get_status()["mode"]
             return jsonify({"ok": True, "data": result})
-        except TimeoutError as exc:
-            return jsonify({"ok": False, "error": str(exc), "timeout": True}), 504
         except Exception as exc:
             return jsonify({"ok": False, "error": str(exc)}), 500
 

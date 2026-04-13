@@ -71,8 +71,8 @@ def get_session_history(session_id: str) -> List[dict]:
 
 def process_voice_turn(
     audio_path: str,
-    session_id: Optional[str] = None,
-    image_path: Optional[str] = None,
+    session_id: str = None,
+    image_path: str = None,
     language: str = "English",
 ) -> dict:
     if not session_id:

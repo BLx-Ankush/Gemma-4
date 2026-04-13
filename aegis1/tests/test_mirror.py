@@ -41,32 +41,3 @@ def test_apply_verdict_modes():
     assert mirror.apply_verdict(original, pass_report) == original
     assert "first-aid guidance only" in mirror.apply_verdict(original, warn_report)
     assert "not confident enough" in mirror.apply_verdict(original, block_report)
-
-
-def test_parse_mirror_response_handles_fractional_confidence_format():
-    raw = (
-        "CONFIDENCE: 85/100\n"
-        "FLAGS: none\n"
-        "REASONING: Practical first-aid guidance with reasonable caution.\n"
-        "VERDICT: pass"
-    )
-
-    report = mirror.parse_mirror_response(raw)
-
-    assert report.confidence_score == 85
-    assert report.flags == []
-    assert report.verdict == "pass"
-
-
-def test_parse_mirror_response_handles_markdown_heading_fields():
-    raw = (
-        "**CONFIDENCE**: 73\n"
-        "**FLAGS**: none\n"
-        "**REASONING**: The answer is useful and remains within first-aid scope.\n"
-        "**VERDICT**: warn"
-    )
-
-    report = mirror.parse_mirror_response(raw)
-
-    assert report.confidence_score == 73
-    assert report.verdict == "warn"

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
 from aegis.core import gemma_core, mirror
-from aegis.core.prompts import build_veda_prompt
 from . import drug_lookup, voice_utils
 import os
 import time
@@ -19,6 +18,31 @@ class VedaResult:
     audio_response_path: str
     processing_time_ms: int
     image_path: str
+
+
+VEDA_SYSTEM_PROMPT = """You are a medical first-response assistant. You are helping a
+person who may not have access to a doctor or hospital. You are
+speaking to them directly in {language}.
+
+Rules you must follow:
+- Never state a definitive diagnosis. Always use phrases like
+  "this appears to be" or "this may be"
+- Always provide immediate first-aid steps the person can take
+  right now with materials they likely have available
+- Always recommend seeking professional medical care when possible
+- Use simple everyday language. If you must use a medical term,
+  immediately explain it in plain words
+- Limit your response to 3 to 5 sentences maximum
+- End every response with one clear action the person should
+  take right now
+- Never recommend specific prescription medications by name
+  unless the user specifically asks about a medication they
+  already have
+- If you are not confident about what you see in the image,
+  say so clearly
+- Be warm, calm, and reassuring in tone
+
+{drug_context}"""
 
 
 LANGUAGE_MAP = {
@@ -48,50 +72,27 @@ SAFE_FALLBACK_MESSAGES = {
 }
 
 
-def _safe_int_env(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
-
-
-def _is_env_enabled(name: str, default: bool) -> bool:
-    raw = os.environ.get(name, "1" if default else "0").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-VEDA_MAX_TOKENS = max(32, min(_safe_int_env("AEGIS_VEDA_MAX_TOKENS", 32), 128))
-SYNC_MIRROR_MAX_MODEL_MS = max(0, _safe_int_env("AEGIS_SYNC_MIRROR_MAX_MODEL_MS", 12000))
-ENABLE_TEXT_TTS = _is_env_enabled("AEGIS_ENABLE_TEXT_TTS", False)
-ENABLE_VOICE_TTS = _is_env_enabled("AEGIS_ENABLE_VOICE_TTS", True)
-TTS_MAX_CHARS = max(120, _safe_int_env("AEGIS_TTS_MAX_CHARS", 500))
-
-
 def _safe_fallback_message(language: str) -> str:
     return SAFE_FALLBACK_MESSAGES.get(language, SAFE_FALLBACK_MESSAGES["English"])
 
 
 def build_system_prompt(language: str = "English", drug_context: str = "") -> str:
-    return build_veda_prompt(language=language, drug_context=drug_context)
+    if drug_context:
+        drug_context_text = "\nRelevant drug information:\n" + drug_context
+    else:
+        drug_context_text = ""
 
-
-def _should_generate_tts(audio_path: Optional[str]) -> bool:
-    return ENABLE_VOICE_TTS if audio_path else ENABLE_TEXT_TTS
-
-
-def _trim_for_tts(text: str) -> str:
-    cleaned = (text or "").strip()
-    if len(cleaned) <= TTS_MAX_CHARS:
-        return cleaned
-    return cleaned[:TTS_MAX_CHARS].rstrip() + "..."
+    return (
+        VEDA_SYSTEM_PROMPT.replace("{language}", language).replace("{drug_context}", drug_context_text)
+    )
 
 
 def process_medical_query(
-    image_path: Optional[str] = None,
-    audio_path: Optional[str] = None,
-    text_query: Optional[str] = None,
+    image_path: str = None,
+    audio_path: str = None,
+    text_query: str = None,
     language: str = "English",
-    session_id: Optional[str] = None,
+    session_id: str = None,
 ) -> VedaResult:
     start_time = time.time()
 
@@ -120,29 +121,12 @@ def process_medical_query(
         else:
             user_message = query_text
 
-        infer_result = gemma_core.infer(
-            system_prompt,
-            user_message,
-            image_path,
-            max_tokens=VEDA_MAX_TOKENS,
-        )
+        infer_result = gemma_core.infer(system_prompt, user_message, image_path)
         raw_response = infer_result.response
         model_latency_ms = infer_result.latency_ms
 
         image_context = f"Image: {image_path}" if image_path else ""
-        if model_latency_ms > SYNC_MIRROR_MAX_MODEL_MS:
-            mirror_report = mirror.MirrorReport(
-                confidence_score=70,
-                flags=["audit_deferred_for_latency"],
-                reasoning_trace=(
-                    "Synchronous MIRROR audit deferred because primary generation was slow "
-                    f"({model_latency_ms}ms)."
-                ),
-                verdict="warn",
-                audit_time_ms=0,
-            )
-        else:
-            mirror_report = mirror.audit(query=query_text, response=raw_response, image_context=image_context)
+        mirror_report = mirror.audit(query=query_text, response=raw_response, image_context=image_context)
         response_text = mirror.apply_verdict(raw_response, mirror_report, detected_language)
 
     except Exception as exc:
@@ -155,12 +139,10 @@ def process_medical_query(
             verdict="warn",
         )
 
-    audio_response_path = ""
-    if _should_generate_tts(audio_path):
-        try:
-            audio_response_path = voice_utils.speak_to_file(_trim_for_tts(response_text))
-        except Exception:
-            audio_response_path = ""
+    try:
+        audio_response_path = voice_utils.speak_to_file(response_text)
+    except Exception:
+        audio_response_path = ""
 
     processing_time_ms = model_latency_ms or int((time.time() - start_time) * 1000)
     return VedaResult(

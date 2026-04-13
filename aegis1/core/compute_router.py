@@ -2,7 +2,7 @@
 AEGIS Compute Router
 Detects connectivity and device RAM. Routes inference to online (cloud) or
 offline (local llama-server). Refresh calls are rate-limited to avoid hammering
-the network on every request in mobile/Termux environments.
+the network on every request — critical for mobile/Termux environments.
 """
 
 import os
@@ -10,12 +10,13 @@ import time
 
 import requests
 
-
+# ── Configuration ──────────────────────────────────────────────────────────────
 PING_URL = os.environ.get("AEGIS_CONNECTIVITY_URL", "http://clients3.google.com/generate_204")
 PING_TIMEOUT_SEC = float(os.environ.get("AEGIS_PING_TIMEOUT", "2"))
+# How many seconds must pass before refresh() will actually re-check the network.
 REFRESH_INTERVAL_SEC = float(os.environ.get("AEGIS_REFRESH_INTERVAL", "30"))
 
-
+# ── Internal state ─────────────────────────────────────────────────────────────
 _last_refresh_at: float = 0.0
 _device_ram_gb: float = 0.0
 _is_online: bool = False
@@ -23,13 +24,15 @@ _mode: str = "offline"
 
 
 def _measure_ram() -> float:
+    """Return total device RAM in GB. Falls back gracefully if psutil unavailable."""
     try:
         import psutil
         return round(psutil.virtual_memory().total / (1024 ** 3), 1)
     except Exception:
+        # Termux without psutil: try /proc/meminfo (Linux/Android)
         try:
-            with open("/proc/meminfo", "r", encoding="utf-8") as file_handle:
-                for line in file_handle:
+            with open("/proc/meminfo", "r") as fh:
+                for line in fh:
                     if line.startswith("MemTotal:"):
                         kb = int(line.split()[1])
                         return round(kb / (1024 ** 2), 1)
@@ -39,6 +42,7 @@ def _measure_ram() -> float:
 
 
 def _check_connectivity() -> bool:
+    """HEAD-request to Google captive-portal endpoint. Returns True if reachable."""
     try:
         response = requests.head(
             PING_URL,
@@ -51,6 +55,7 @@ def _check_connectivity() -> bool:
 
 
 def _do_refresh() -> None:
+    """Internal: unconditionally refresh all state."""
     global _device_ram_gb, _is_online, _mode, _last_refresh_at
     _device_ram_gb = _measure_ram()
     _is_online = _check_connectivity()
@@ -58,23 +63,21 @@ def _do_refresh() -> None:
     _last_refresh_at = time.time()
 
 
-def check_connectivity() -> bool:
-    return _check_connectivity()
-
-
-def check_ram() -> float:
-    return _measure_ram()
-
-
+# Initialise on import
 _do_refresh()
 
-
+# Public aliases (kept in sync by refresh())
 DEVICE_RAM_GB: float = _device_ram_gb
 IS_ONLINE: bool = _is_online
 MODE: str = _mode
 
 
 def refresh() -> dict:
+    """
+    Re-checks connectivity and RAM. Rate-limited to once per REFRESH_INTERVAL_SEC
+    so that frequent callers (MIRROR audit, status polling) don't each fire a
+    network request. For an immediate forced re-check use force_refresh().
+    """
     global DEVICE_RAM_GB, IS_ONLINE, MODE
 
     now = time.time()
@@ -94,6 +97,10 @@ def refresh() -> dict:
 
 
 def get_status() -> dict:
+    """
+    Returns the current cached state without triggering a network check.
+    Use this inside tight inference loops to avoid latency spikes.
+    """
     return {
         "mode": _mode,
         "ram_gb": _device_ram_gb,
@@ -103,6 +110,7 @@ def get_status() -> dict:
 
 
 def force_refresh() -> dict:
+    """Bypass rate-limit and force an immediate connectivity re-check."""
     _do_refresh()
     global DEVICE_RAM_GB, IS_ONLINE, MODE
     DEVICE_RAM_GB = _device_ram_gb
