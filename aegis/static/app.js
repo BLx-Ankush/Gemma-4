@@ -1,13 +1,10 @@
 /**
- * AEGIS Frontend — Vanilla JS
- * No framework, no build step. Runs directly from Termux Flask server.
- *
- * Covers:
- *  - Tab navigation
- *  - VEDA: text + image medical query
- *  - VOICE: MediaRecorder session with waveform visualiser
- *  - MIRROR: audit log viewer with verdict stats
- *  - Online/offline status badge (polls /status every 20s)
+ * AEGIS Frontend — Unified one-panel assistant flow
+ * - Optional photo capture
+ * - Center speak button for voice query
+ * - Auto language detection from transcription
+ * - Response text + audio playback
+ * - Local history drawer from top-right icon
  */
 
 "use strict";
@@ -19,204 +16,110 @@ if ("serviceWorker" in navigator) {
         registration.unregister();
       });
     }).catch(() => {
-      // Ignore failures; app continues without service worker support.
+      // Ignore service worker cleanup failures.
     });
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DOM refs
-// ─────────────────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 
-const tabs        = document.querySelectorAll(".tab");
-const tabPanels   = document.querySelectorAll(".tab-panel");
+// Status + runtime badges
+const statusDot = $("status-dot");
+const statusText = $("status-text");
+const modelText = $("model-text");
+const modePill = $("mode-pill");
+const cooldownPill = $("cooldown-pill");
+const cooldownText = $("cooldown-text");
 
-// Status bar
-const statusDot   = $("status-dot");
-const statusText  = $("status-text");
-const modelText   = $("model-text");
+// History drawer
+const historyToggle = $("history-toggle");
+const historyCount = $("history-count");
+const historyDrawer = $("history-drawer");
+const historyClose = $("history-close");
+const historyClear = $("history-clear");
+const historyList = $("history-list");
 
-// VEDA
-const vedaForm      = $("veda-form");
-const vedaText      = $("veda-text");
-const vedaLanguage  = $("veda-language");
-const vedaImage     = $("veda-image");
-const vedaSubmit    = $("veda-submit");
-const imgPreviewWrap = $("img-preview-wrap");
-const imgPreview    = $("img-preview");
-const imgRemove     = $("img-remove");
-const captureLabel  = $("capture-label");
-const vedaResponseArea = $("veda-response-area");
-const vedaResponseText = $("veda-response-text");
-const vedaAudio        = $("veda-audio");
-const vedaLangChip     = $("veda-lang-chip");
-const vedaModeChip     = $("veda-mode-chip");
-const vedaMirrorPanel  = $("veda-mirror-panel");
-const vedaScoreArc     = $("veda-score-arc");
-const vedaScoreNum     = $("veda-score-num");
-const vedaVerdict      = $("veda-verdict");
-const vedaFlags        = $("veda-flags");
-const vedaReasoning    = $("veda-reasoning");
-const vedaMeta         = $("veda-meta");
+// Assistant panel
+const assistantImage = $("assistant-image");
+const assistantImagePreviewWrap = $("assistant-image-preview-wrap");
+const assistantImagePreview = $("assistant-image-preview");
+const assistantImageRemove = $("assistant-image-remove");
+const captureLabel = $("capture-label");
 
-// VOICE
-const btnStartSession = $("btn-start-session");
-const btnEndSession   = $("btn-end-session");
-const sessionChip     = $("session-chip");
-const recordBtn       = $("record-btn");
-const recordRing      = $("record-ring");
-const recordIconMic   = document.querySelector(".record-icon-mic");
-const recordIconStop  = document.querySelector(".record-icon-stop");
-const recordHint      = $("record-hint");
-const waveCanvas      = $("waveform-canvas");
-const voiceLanguage   = $("voice-language");
-const voiceResponseArea = $("voice-response-area");
-const voiceTranscriptBubble = $("voice-transcript-bubble");
-const voiceTranscriptText   = $("voice-transcript-text");
-const voiceResponseText = $("voice-response-text");
-const voiceAudio        = $("voice-audio");
-const voiceLangChip     = $("voice-lang-chip");
-const voiceModeChip     = $("voice-mode-chip");
-const voiceMirrorPanel  = $("voice-mirror-panel");
-const voiceScoreArc     = $("voice-score-arc");
-const voiceScoreNum     = $("voice-score-num");
-const voiceVerdict      = $("voice-verdict");
-const voiceFlags        = $("voice-flags");
-const voiceReasoning    = $("voice-reasoning");
-const voiceMeta         = $("voice-meta");
-const historySection    = $("history-section");
-const historyList       = $("history-list");
+const recordBtn = $("record-btn");
+const recordRing = $("record-ring");
+const recordIconMic = document.querySelector(".record-icon-mic");
+const recordIconStop = document.querySelector(".record-icon-stop");
+const recordHint = $("record-hint");
+const waveCanvas = $("waveform-canvas");
 
-// MIRROR log
-const mirrorSummary    = $("mirror-summary");
-const mirrorLogList    = $("mirror-log-list");
-const btnRefreshLog    = $("btn-refresh-log");
+const assistantResponseArea = $("assistant-response-area");
+const assistantTranscriptWrap = $("assistant-transcript-wrap");
+const assistantTranscript = $("assistant-transcript");
+const assistantResponseText = $("assistant-response-text");
+const assistantResponseAudio = $("assistant-response-audio");
+const assistantLangChip = $("assistant-lang-chip");
+const assistantModeChip = $("assistant-mode-chip");
+const assistantResponseMeta = $("assistant-response-meta");
 
-// Spinner
-const spinner    = $("spinner");
-const spinnerMsg = $("spinner-msg");
-const spinnerElapsed = $("spinner-elapsed");
-const spinnerCancel = $("spinner-cancel");
-const REQUEST_TIMEOUT_MS = 70000;
-let spinnerHintTimer = null;
-let spinnerFailSafeTimer = null;
-let spinnerElapsedTimer = null;
-let spinnerStartedAtMs = 0;
+const ONLINE_REQUEST_TIMEOUT_MS = 60000;
+const OFFLINE_REQUEST_TIMEOUT_MS = 180000;
+const REQUEST_TIMEOUT_BUFFER_MS = 5000;
+const HISTORY_STORAGE_KEY = "aegis.assistant.history.v1";
+const HISTORY_LIMIT = 80;
+
+let currentMode = "unknown";
+let cloudCooldownUntilMs = 0;
 let activeRequestController = null;
+let serverVoiceTimeoutMs = 0;
 
+let activeSessionId = null;
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let audioCtx = null;
+let analyserNode = null;
+let waveAnimFrame = null;
+let micStream = null;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tab navigation
-// ─────────────────────────────────────────────────────────────────────────────
-tabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
-    const target = tab.dataset.tab;
-    tabs.forEach((t) => t.classList.remove("active"));
-    tabPanels.forEach((p) => {
-      p.classList.remove("active");
-      p.hidden = true;
-    });
-    tab.classList.add("active");
-    const panel = $("panel-" + target);
-    panel.classList.add("active");
-    panel.hidden = false;
-
-    // Refresh MIRROR log when switching to that tab
-    if (target === "mirror") loadMirrorLog();
-  });
-});
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Spinner helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function showSpinner(msg = "Processing…") {
-  spinnerMsg.textContent = msg;
-  spinner.hidden = false;
-  spinnerStartedAtMs = Date.now();
-
-  if (spinnerElapsed) {
-    spinnerElapsed.hidden = false;
-    spinnerElapsed.textContent = "Elapsed: 0s";
-  }
-
-  if (spinnerCancel) {
-    spinnerCancel.disabled = false;
-  }
-
-  if (spinnerHintTimer) {
-    clearTimeout(spinnerHintTimer);
-  }
-  if (spinnerFailSafeTimer) {
-    clearTimeout(spinnerFailSafeTimer);
-  }
-  if (spinnerElapsedTimer) {
-    clearInterval(spinnerElapsedTimer);
-  }
-
-  spinnerElapsedTimer = setInterval(() => {
-    if (spinner.hidden) {
-      return;
-    }
-    const elapsedSec = Math.max(0, Math.floor((Date.now() - spinnerStartedAtMs) / 1000));
-    if (spinnerElapsed) {
-      spinnerElapsed.textContent = `Elapsed: ${elapsedSec}s`;
-    }
-  }, 1000);
-
-  spinnerHintTimer = setTimeout(() => {
-    if (!spinner.hidden) {
-      spinnerMsg.textContent = "Still processing on local model… request will auto-timeout if it takes too long.";
-    }
-  }, 10000);
-  spinnerFailSafeTimer = setTimeout(() => {
-    if (!spinner.hidden) {
-      abortActiveRequest("Request cancelled automatically to keep the app responsive.");
-    }
-  }, REQUEST_TIMEOUT_MS + 3000);
+function escHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;");
 }
 
-function abortActiveRequest(message) {
-  if (activeRequestController) {
-    activeRequestController.abort();
-    activeRequestController = null;
-  }
-  if (message) {
-    spinnerMsg.textContent = message;
-  }
-  hideSpinner();
+function getCloudCooldownRemainingSec() {
+  return Math.max(0, Math.ceil((cloudCooldownUntilMs - Date.now()) / 1000));
 }
 
-function hideSpinner() {
-  spinner.hidden = true;
-  if (spinnerHintTimer) {
-    clearTimeout(spinnerHintTimer);
-    spinnerHintTimer = null;
+function isLikelyLocalProcessing() {
+  return currentMode === "offline" || getCloudCooldownRemainingSec() > 0;
+}
+
+function getRequestTimeoutMs() {
+  const baseTimeoutMs = isLikelyLocalProcessing() ? OFFLINE_REQUEST_TIMEOUT_MS : ONLINE_REQUEST_TIMEOUT_MS;
+  if (serverVoiceTimeoutMs > 0) {
+    return Math.max(baseTimeoutMs, serverVoiceTimeoutMs + REQUEST_TIMEOUT_BUFFER_MS);
   }
-  if (spinnerFailSafeTimer) {
-    clearTimeout(spinnerFailSafeTimer);
-    spinnerFailSafeTimer = null;
+  return baseTimeoutMs;
+}
+
+function renderCooldownPill() {
+  if (!cooldownPill || !cooldownText) {
+    return;
   }
-  if (spinnerElapsedTimer) {
-    clearInterval(spinnerElapsedTimer);
-    spinnerElapsedTimer = null;
-  }
-  if (spinnerElapsed) {
-    spinnerElapsed.hidden = true;
-  }
-  if (spinnerCancel) {
-    spinnerCancel.disabled = true;
+  const remainingSec = getCloudCooldownRemainingSec();
+  if (remainingSec > 0) {
+    cooldownPill.hidden = false;
+    cooldownText.textContent = `Cloud cooldown: ${remainingSec}s`;
+  } else {
+    cooldownPill.hidden = true;
   }
 }
 
-if (spinnerCancel) {
-  spinnerCancel.addEventListener("click", () => {
-    abortActiveRequest("Request cancelled.");
-  });
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = getRequestTimeoutMs()) {
   const controller = new AbortController();
   activeRequestController = controller;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -230,228 +133,232 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_M
   }
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Status polling — every 20 seconds
-// ─────────────────────────────────────────────────────────────────────────────
 async function fetchStatus() {
   try {
-    const res  = await fetch("/status");
+    const res = await fetch("/status");
     const data = await res.json();
-    if (!data.ok) throw new Error();
+    if (!data.ok) {
+      throw new Error("status not ok");
+    }
 
-    const mode    = data.compute?.mode || "unknown";
-    const online  = mode === "online";
+    const mode = data.compute?.mode || "unknown";
+    const online = mode === "online";
     const backend = data.model?.active_backend || (data.model?.loaded ? "ready" : "cold");
-    const vision  = data.model?.has_vision ? " · vision ✓" : "";
+    const vision = data.model?.has_vision ? " · vision ✓" : "";
 
-    statusDot.dataset.mode = mode;   // CSS uses this for colour
-    statusText.textContent = online ? "Online — Cloud" : "Offline — Local";
-    modelText.textContent  = `${backend}${vision}`;
+    const rawCooldown = Number(data.model?.cloud_cooldown_remaining_sec || 0);
+    const cooldownSec = Number.isFinite(rawCooldown) ? Math.max(0, Math.round(rawCooldown)) : 0;
+    const rawVoiceTimeoutSec = Number(data.runtime?.timeouts?.voice_request_sec || 0);
 
-    $("mode-pill").dataset.mode = mode;
+    currentMode = mode;
+    cloudCooldownUntilMs = Date.now() + (cooldownSec * 1000);
+    serverVoiceTimeoutMs = Number.isFinite(rawVoiceTimeoutSec) && rawVoiceTimeoutSec > 0
+      ? Math.round(rawVoiceTimeoutSec * 1000)
+      : 0;
+
+    statusDot.dataset.mode = mode;
+    statusText.textContent = online
+      ? (cooldownSec > 0 ? "Online — Cloud Cooling Down" : "Online — Cloud")
+      : "Offline — Local";
+    modelText.textContent = `${backend}${vision}`;
+    modePill.dataset.mode = mode;
+    renderCooldownPill();
   } catch {
+    currentMode = "unknown";
+    cloudCooldownUntilMs = 0;
+    serverVoiceTimeoutMs = 0;
     statusDot.dataset.mode = "error";
     statusText.textContent = "Server unreachable";
-    modelText.textContent  = "";
+    modelText.textContent = "";
+    renderCooldownPill();
   }
 }
 
-fetchStatus();
-setInterval(fetchStatus, 20000);
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MIRROR panel renderer (shared by VEDA + VOICE)
-// ─────────────────────────────────────────────────────────────────────────────
-function renderMirror(mirrorData, { panel, arc, num, verdict, flags, reasoning }) {
-  if (!mirrorData) return;
-
-  const score   = mirrorData.confidence_score ?? 0;
-  const verd    = (mirrorData.verdict || "warn").toLowerCase();
-  const flagArr = mirrorData.flags || [];
-  const reason  = mirrorData.reasoning_trace || "";
-
-  // Score ring: circumference = 2π×18 ≈ 113
-  const offset = 113 - (score / 100) * 113;
-  arc.style.strokeDashoffset = offset;
-  arc.style.stroke = verd === "pass" ? "#0db89e" : verd === "warn" ? "#f59d34" : "#c6432d";
-  num.textContent = score;
-
-  // Verdict badge
-  const verdLabel = { pass: "✓ PASS", warn: "⚠ WARN", block: "✗ BLOCK" }[verd] || verd.toUpperCase();
-  verdict.textContent = verdLabel;
-  verdict.dataset.verdict = verd;
-
-  // Flags
-  flags.innerHTML = flagArr.length
-    ? flagArr.map((f) => `<span class="flag-tag">${f.replace(/_/g, " ")}</span>`).join("")
-    : '<span class="flag-ok">No flags</span>';
-
-  // Reasoning
-  reasoning.textContent = reason;
-
-  panel.hidden = false;
+function getHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
+function saveHistory(entries) {
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(entries.slice(0, HISTORY_LIMIT)));
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VEDA — text + image query
-// ─────────────────────────────────────────────────────────────────────────────
+function updateHistoryCount() {
+  if (!historyCount) {
+    return;
+  }
+  historyCount.textContent = String(getHistory().length);
+}
 
-// Image preview
-vedaImage.addEventListener("change", () => {
-  const file = vedaImage.files[0];
-  if (!file) return;
-  const url = URL.createObjectURL(file);
-  imgPreview.src = url;
-  imgPreviewWrap.hidden = false;
-  captureLabel.classList.add("has-image");
-});
-
-imgRemove.addEventListener("click", () => {
-  vedaImage.value = "";
-  imgPreview.src = "";
-  imgPreviewWrap.hidden = true;
-  captureLabel.classList.remove("has-image");
-});
-
-vedaForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-
-  const text = vedaText.value.trim();
-  if (!text && !vedaImage.files[0]) {
-    vedaText.focus();
+function renderHistoryList() {
+  if (!historyList) {
     return;
   }
 
-  showSpinner("Sending to AEGIS…");
-  vedaSubmit.disabled = true;
-
-  try {
-    const fd = new FormData();
-    fd.append("text", text);
-    fd.append("language", vedaLanguage.value);
-    if (vedaImage.files[0]) fd.append("image", vedaImage.files[0]);
-
-    const res  = await fetchWithTimeout("/veda", { method: "POST", body: fd });
-    const data = await res.json();
-
-    if (!data.ok) throw new Error(data.error || "Request failed");
-
-    const d = data.data;
-
-    // Response text
-    vedaResponseText.textContent = d.response_text || "";
-
-    // Chips
-    vedaLangChip.textContent = d.detected_language || "";
-    vedaModeChip.textContent = (d.mode || "").toUpperCase();
-    vedaModeChip.dataset.mode = d.mode || "";
-
-    // Audio
-    if (d.audio_response_data_url) {
-      vedaAudio.src = d.audio_response_data_url;
-      vedaAudio.hidden = false;
-      vedaAudio.play().catch(() => {});
-    } else {
-      vedaAudio.hidden = true;
-    }
-
-    // MIRROR
-    renderMirror(d.mirror, {
-      panel: vedaMirrorPanel, arc: vedaScoreArc, num: vedaScoreNum,
-      verdict: vedaVerdict, flags: vedaFlags, reasoning: vedaReasoning,
-    });
-
-    // Meta bar
-    const ms = d.processing_time_ms || 0;
-    const auditMs = d.mirror?.audit_time_ms || 0;
-    vedaMeta.textContent = `Inference: ${ms}ms · Audit: ${auditMs}ms · Drug context: ${d.drug_context ? "yes" : "none"}`;
-
-    vedaResponseArea.hidden = false;
-    vedaResponseArea.scrollIntoView({ behavior: "smooth", block: "nearest" });
-
-  } catch (err) {
-    if (err && err.name === "AbortError") {
-      vedaResponseText.textContent = "Error: Request timed out after 70s. Please retry.";
-    } else {
-      vedaResponseText.textContent = "Error: " + err.message;
-    }
-    vedaMirrorPanel.hidden = true;
-    vedaResponseArea.hidden = false;
-  } finally {
-    hideSpinner();
-    vedaSubmit.disabled = false;
+  const entries = getHistory();
+  if (!entries.length) {
+    historyList.innerHTML = "<p class='empty-note'>No history yet.</p>";
+    return;
   }
-});
 
+  historyList.innerHTML = entries.map((entry, index) => {
+    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "";
+    const photoTag = entry.hasImage ? "Photo" : "Voice only";
+    return `
+      <article class="history-item">
+        <div class="history-item-head">
+          <span class="history-item-index">#${entries.length - index}</span>
+          <span class="history-item-time">${escHtml(ts)}</span>
+        </div>
+        <p class="history-item-line"><strong>Input:</strong> ${escHtml(entry.input)}</p>
+        <p class="history-item-line"><strong>Response:</strong> ${escHtml(entry.output)}</p>
+        <div class="history-item-tags">
+          <span class="history-tag">${escHtml(entry.detectedLanguage || "Unknown")}</span>
+          <span class="history-tag">${escHtml((entry.mode || "unknown").toUpperCase())}</span>
+          <span class="history-tag">${photoTag}</span>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VOICE — session + MediaRecorder + waveform
-// ─────────────────────────────────────────────────────────────────────────────
-let activeSessionId  = null;
-let mediaRecorder    = null;
-let audioChunks      = [];
-let isRecording      = false;
-let audioCtx         = null;
-let analyserNode     = null;
-let waveAnimFrame    = null;
-let micStream        = null;
+function addHistoryEntry(entry) {
+  const entries = getHistory();
+  entries.unshift(entry);
+  saveHistory(entries);
+  updateHistoryCount();
+  renderHistoryList();
+}
 
-// Waveform drawing
+function openHistoryDrawer() {
+  renderHistoryList();
+  historyDrawer.hidden = false;
+  document.body.classList.add("history-open");
+  historyToggle.setAttribute("aria-expanded", "true");
+}
+
+function closeHistoryDrawer() {
+  historyDrawer.hidden = true;
+  document.body.classList.remove("history-open");
+  historyToggle.setAttribute("aria-expanded", "false");
+}
+
+function toggleHistoryDrawer() {
+  if (historyDrawer.hidden) {
+    openHistoryDrawer();
+  } else {
+    closeHistoryDrawer();
+  }
+}
+
 function drawWaveform() {
-  if (!analyserNode) return;
+  if (!analyserNode) {
+    return;
+  }
+
   const ctx = waveCanvas.getContext("2d");
-  const W = waveCanvas.width;
-  const H = waveCanvas.height;
-  const buf = new Uint8Array(analyserNode.frequencyBinCount);
+  const width = waveCanvas.width;
+  const height = waveCanvas.height;
+  const data = new Uint8Array(analyserNode.frequencyBinCount);
 
   function frame() {
-    if (!isRecording) return;
+    if (!isRecording) {
+      return;
+    }
+
     waveAnimFrame = requestAnimationFrame(frame);
-    analyserNode.getByteTimeDomainData(buf);
-    ctx.clearRect(0, 0, W, H);
+    analyserNode.getByteTimeDomainData(data);
+
+    ctx.clearRect(0, 0, width, height);
     ctx.strokeStyle = "#0db89e";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    const step = W / buf.length;
-    buf.forEach((v, i) => {
-      const x = i * step;
-      const y = (v / 128) * (H / 2);
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+
+    const step = width / data.length;
+    data.forEach((value, index) => {
+      const x = index * step;
+      const y = (value / 128) * (height / 2);
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
     });
+
     ctx.stroke();
   }
+
   frame();
 }
 
+async function ensureVoiceSession() {
+  if (activeSessionId) {
+    return activeSessionId;
+  }
+
+  const res = await fetch("/api/voice/session", { method: "POST" });
+  const data = await res.json();
+
+  if (!data.ok || !data.session_id) {
+    throw new Error(data.error || "Could not create voice session");
+  }
+
+  activeSessionId = data.session_id;
+  return activeSessionId;
+}
+
+function stopMicResources() {
+  cancelAnimationFrame(waveAnimFrame);
+  micStream?.getTracks().forEach((track) => track.stop());
+  audioCtx?.close();
+
+  waveCanvas.hidden = true;
+  const ctx = waveCanvas.getContext("2d");
+  ctx.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
+}
+
 async function startRecording() {
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    alert("Microphone access denied. Please allow microphone permission in your browser.");
+  if (isRecording) {
     return;
   }
 
-  // Web Audio waveform
-  audioCtx    = new (window.AudioContext || window.webkitAudioContext)();
+  recordBtn.disabled = true;
+  recordHint.textContent = "Preparing microphone...";
+
+  try {
+    await ensureVoiceSession();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    alert(err?.message || "Microphone access denied. Please allow microphone permission in your browser.");
+    recordBtn.disabled = false;
+    recordHint.textContent = "Tap to speak";
+    return;
+  }
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   analyserNode = audioCtx.createAnalyser();
   analyserNode.fftSize = 256;
   audioCtx.createMediaStreamSource(micStream).connect(analyserNode);
 
-  // MediaRecorder — prefer audio/webm, fallback to any supported
   const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
     ? "audio/webm;codecs=opus"
-    : MediaRecorder.isTypeSupported("audio/webm")
-    ? "audio/webm"
-    : "";
+    : (MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "");
 
   mediaRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
   audioChunks = [];
 
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) audioChunks.push(e.data);
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      audioChunks.push(event.data);
+    }
   };
 
   mediaRecorder.onstop = async () => {
@@ -460,233 +367,195 @@ async function startRecording() {
     await sendVoiceTurn(blob);
   };
 
-  mediaRecorder.start(200);   // collect data every 200ms
+  mediaRecorder.start(200);
   isRecording = true;
 
-  // UI state
   recordBtn.classList.add("recording");
   recordBtn.setAttribute("aria-pressed", "true");
   recordIconMic.hidden = true;
   recordIconStop.hidden = false;
   recordHint.textContent = "Tap again to stop recording";
   waveCanvas.hidden = false;
+  recordBtn.disabled = false;
+
   drawWaveform();
 }
 
 function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === "inactive") return;
+  if (!mediaRecorder || mediaRecorder.state === "inactive") {
+    return;
+  }
+
   isRecording = false;
-  cancelAnimationFrame(waveAnimFrame);
-
   mediaRecorder.stop();
-  micStream?.getTracks().forEach((t) => t.stop());
-  audioCtx?.close();
+  stopMicResources();
 
-  // UI state
   recordBtn.classList.remove("recording");
   recordBtn.setAttribute("aria-pressed", "false");
   recordIconMic.hidden = false;
   recordIconStop.hidden = true;
-  recordHint.textContent = "Processing…";
-  waveCanvas.hidden = true;
-  const wCtx = waveCanvas.getContext("2d");
-  wCtx.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
+  recordHint.textContent = "Processing...";
+  recordBtn.disabled = true;
 }
 
-recordBtn.addEventListener("click", () => {
-  if (!activeSessionId) return;
-  if (isRecording) {
-    stopRecording();
-  } else {
-    startRecording();
-  }
-});
-
-// Session management
-btnStartSession.addEventListener("click", async () => {
-  const res  = await fetch("/api/voice/session", { method: "POST" });
-  const data = await res.json();
-  if (!data.ok) { alert("Failed to start session"); return; }
-
-  activeSessionId = data.session_id;
-  sessionChip.textContent = "Session: " + activeSessionId.slice(0, 8) + "…";
-  btnEndSession.disabled = false;
-  btnStartSession.disabled = true;
-  recordBtn.disabled = false;
-  recordHint.textContent = "Tap to speak";
-  historySection.hidden = false;
-});
-
-btnEndSession.addEventListener("click", async () => {
-  if (!activeSessionId) return;
-  await fetch(`/api/voice/session/${encodeURIComponent(activeSessionId)}`, { method: "DELETE" });
-  activeSessionId = null;
-  sessionChip.textContent = "No active session";
-  btnEndSession.disabled = true;
-  btnStartSession.disabled = false;
-  recordBtn.disabled = true;
-  recordHint.textContent = "Start a session first";
-  historyList.innerHTML = "";
-  historySection.hidden = true;
-  voiceResponseArea.hidden = true;
-});
-
-// Send recorded audio to backend
 async function sendVoiceTurn(blob) {
-  showSpinner("Transcribing and processing…");
+  const requestTimeoutMs = getRequestTimeoutMs();
 
-  const fd = new FormData();
-  fd.append("session_id", activeSessionId);
-  fd.append("language", voiceLanguage.value);
-  fd.append("audio", blob, "turn.webm");
+  const formData = new FormData();
+  formData.append("session_id", activeSessionId);
+  formData.append("language", "English");
+  formData.append("audio", blob, "turn.webm");
+
+  if (assistantImage.files[0]) {
+    formData.append("image", assistantImage.files[0]);
+  }
 
   try {
-    const res  = await fetchWithTimeout("/voice", { method: "POST", body: fd });
+    const res = await fetchWithTimeout("/voice", { method: "POST", body: formData }, requestTimeoutMs);
     const data = await res.json();
 
-    if (!data.ok) throw new Error(data.error || "Voice query failed");
-
-    const d = data.data;
-
-    // Transcript bubble
-    if (d.transcript || d.query_text) {
-      voiceTranscriptText.textContent = d.transcript || d.query_text;
-      voiceTranscriptBubble.hidden = false;
+    if (!data.ok) {
+      throw new Error(data.error || "Voice query failed");
     }
 
-    // Response
-    voiceResponseText.textContent = d.response_text || "";
+    const payload = data.data || {};
+    const transcript = payload.transcript || payload.query_text || "";
+    const responseText = payload.response_text || "";
 
-    // Chips
-    voiceLangChip.textContent = d.detected_language || "";
-    voiceModeChip.textContent = (d.mode || "").toUpperCase();
-    voiceModeChip.dataset.mode = d.mode || "";
-
-    // Audio — autoplay (key demo moment)
-    if (d.audio_response_data_url) {
-      voiceAudio.src = d.audio_response_data_url;
-      voiceAudio.hidden = false;
-      voiceAudio.play().catch(() => {});
+    if (transcript) {
+      assistantTranscript.textContent = transcript;
+      assistantTranscriptWrap.hidden = false;
     } else {
-      voiceAudio.hidden = true;
+      assistantTranscriptWrap.hidden = true;
     }
 
-    // MIRROR
-    renderMirror(d.mirror, {
-      panel: voiceMirrorPanel, arc: voiceScoreArc, num: voiceScoreNum,
-      verdict: voiceVerdict, flags: voiceFlags, reasoning: voiceReasoning,
+    assistantResponseText.textContent = responseText;
+    assistantLangChip.textContent = payload.detected_language || "Detected";
+    assistantModeChip.textContent = (payload.mode || currentMode || "unknown").toUpperCase();
+    assistantModeChip.dataset.mode = payload.mode || currentMode || "unknown";
+    assistantResponseMeta.textContent = `Processing: ${payload.processing_time_ms || 0}ms`;
+
+    if (payload.audio_response_data_url) {
+      assistantResponseAudio.src = payload.audio_response_data_url;
+      assistantResponseAudio.hidden = false;
+      assistantResponseAudio.play().catch(() => {});
+    } else {
+      assistantResponseAudio.hidden = true;
+      assistantResponseAudio.src = "";
+    }
+
+    assistantResponseArea.hidden = false;
+
+    addHistoryEntry({
+      timestamp: Date.now(),
+      input: transcript,
+      output: responseText,
+      detectedLanguage: payload.detected_language || "Unknown",
+      mode: payload.mode || currentMode,
+      hasImage: Boolean(assistantImage.files[0]),
     });
-
-    voiceMeta.textContent = `Turn ${d.turn_count || 1} · ${d.processing_time_ms || 0}ms`;
-
-    voiceResponseArea.hidden = false;
-    voiceResponseArea.scrollIntoView({ behavior: "smooth", block: "nearest" });
-
-    // Update history
-    await refreshHistory();
-
   } catch (err) {
-    if (err && err.name === "AbortError") {
-      voiceResponseText.textContent = "Error: Voice request timed out after 70s. Please retry.";
+    if (err?.name === "AbortError") {
+      assistantResponseText.textContent = `Error: Voice request timed out after ${Math.round(requestTimeoutMs / 1000)}s. Please retry.`;
     } else {
-      voiceResponseText.textContent = "Error: " + err.message;
+      assistantResponseText.textContent = `Error: ${err?.message || "Unknown error"}`;
     }
-    voiceResponseArea.hidden = false;
+    assistantResponseAudio.hidden = true;
+    assistantResponseMeta.textContent = "";
+    assistantResponseArea.hidden = false;
   } finally {
-    hideSpinner();
+    recordBtn.disabled = false;
     recordHint.textContent = "Tap to speak";
   }
 }
 
-// Fetch and render turn history
-async function refreshHistory() {
-  if (!activeSessionId) return;
-  const res  = await fetch(`/api/voice/history/${encodeURIComponent(activeSessionId)}`);
-  const data = await res.json();
-  const turns = data.history || [];
-
-  if (!turns.length) {
-    historyList.innerHTML = "<p class='empty-note'>No turns yet.</p>";
+assistantImage.addEventListener("change", () => {
+  const file = assistantImage.files[0];
+  if (!file) {
     return;
   }
 
-  historyList.innerHTML = turns.map((t, i) => `
-    <div class="history-turn">
-      <div class="history-turn-header">Turn ${i + 1} &middot; <span class="hist-lang">${t.language || ""}</span></div>
-      <div class="history-user"><strong>You:</strong> ${escHtml(t.user_text || "(no transcript)")}</div>
-      <div class="history-aegis"><strong>AEGIS:</strong> ${escHtml(t.assistant_text || "")}</div>
-    </div>
-  `).join("");
-}
+  const objectUrl = URL.createObjectURL(file);
+  assistantImagePreview.src = objectUrl;
+  assistantImagePreviewWrap.hidden = false;
+  captureLabel.classList.add("has-image");
+});
 
+assistantImageRemove.addEventListener("click", () => {
+  assistantImage.value = "";
+  assistantImagePreview.src = "";
+  assistantImagePreviewWrap.hidden = true;
+  captureLabel.classList.remove("has-image");
+});
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MIRROR audit log
-// ─────────────────────────────────────────────────────────────────────────────
-async function loadMirrorLog() {
-  const res  = await fetch("/mirror/log?limit=50");
-  const data = await res.json();
-  const entries = data.data || [];
+recordBtn.addEventListener("click", () => {
+  if (isRecording) {
+    stopRecording();
+  } else {
+    startRecording().catch((err) => {
+      alert(err?.message || "Failed to start recording");
+      recordBtn.disabled = false;
+      recordHint.textContent = "Tap to speak";
+    });
+  }
+});
 
-  if (!entries.length) {
-    mirrorLogList.innerHTML = "<p class='empty-note'>No audit entries yet.</p>";
-    mirrorSummary.innerHTML = "";
-    return;
+historyToggle.addEventListener("click", (event) => {
+  event.preventDefault();
+  toggleHistoryDrawer();
+});
+
+historyClose.addEventListener("click", (event) => {
+  event.preventDefault();
+  closeHistoryDrawer();
+});
+
+historyClear.addEventListener("click", () => {
+  saveHistory([]);
+  updateHistoryCount();
+  renderHistoryList();
+});
+
+historyDrawer.addEventListener("click", (event) => {
+  if (event.target === historyDrawer) {
+    closeHistoryDrawer();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeHistoryDrawer();
+  }
+});
+
+window.addEventListener("beforeunload", () => {
+  if (activeRequestController) {
+    activeRequestController.abort();
   }
 
-  // Summary stats
-  const total   = entries.length;
-  const passes  = entries.filter((e) => e.report?.verdict === "pass").length;
-  const warns   = entries.filter((e) => e.report?.verdict === "warn").length;
-  const blocks  = entries.filter((e) => e.report?.verdict === "block").length;
-  const avgConf = Math.round(
-    entries.reduce((s, e) => s + (e.report?.confidence_score || 0), 0) / total
-  );
+  stopMicResources();
 
-  mirrorSummary.innerHTML = `
-    <div class="summary-grid">
-      <div class="summary-card pass"><span class="summary-num">${passes}</span><span>PASS</span></div>
-      <div class="summary-card warn"><span class="summary-num">${warns}</span><span>WARN</span></div>
-      <div class="summary-card block"><span class="summary-num">${blocks}</span><span>BLOCK</span></div>
-      <div class="summary-card neutral"><span class="summary-num">${avgConf}</span><span>Avg Confidence</span></div>
-    </div>
-  `;
+  if (activeSessionId) {
+    fetch(`/api/voice/session/${encodeURIComponent(activeSessionId)}`, { method: "DELETE" }).catch(() => {});
+  }
+});
 
-  // Log entries (newest first — already reversed by backend)
-  mirrorLogList.innerHTML = entries.map((e) => {
-    const r    = e.report || {};
-    const verd = (r.verdict || "warn").toLowerCase();
-    const ts   = e.timestamp ? new Date(e.timestamp * 1000).toLocaleTimeString() : "";
-    const q    = escHtml((e.query || "").slice(0, 120));
-    const resp = escHtml((e.response || "").slice(0, 160));
-    const flags = (r.flags || []).map((f) => `<span class="flag-tag">${f.replace(/_/g, " ")}</span>`).join("");
-    return `
-      <div class="log-entry" data-verdict="${verd}">
-        <div class="log-entry-header">
-          <span class="verdict-badge" data-verdict="${verd}">${verd.toUpperCase()}</span>
-          <span class="log-score">Confidence: ${r.confidence_score ?? "—"}</span>
-          <span class="log-time">${ts}</span>
-          <span class="log-backend">${escHtml(e.backend || "")}</span>
-        </div>
-        <div class="log-query"><strong>Query:</strong> ${q}</div>
-        <div class="log-resp"><strong>Response:</strong> ${resp}</div>
-        <div class="log-flags">${flags}</div>
-        ${r.reasoning_trace ? `<div class="log-reason">${escHtml(r.reasoning_trace)}</div>` : ""}
-      </div>
-    `;
-  }).join("");
-}
+renderHistoryList();
+updateHistoryCount();
+historyToggle.setAttribute("aria-expanded", "false");
+recordBtn.disabled = false;
 
-btnRefreshLog.addEventListener("click", loadMirrorLog);
+fetchStatus();
+setInterval(fetchStatus, 20000);
+setInterval(renderCooldownPill, 1000);
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility
-// ─────────────────────────────────────────────────────────────────────────────
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+window.AEGIS_ASSISTANT = {
+  getHistory,
+  openHistoryDrawer,
+  closeHistoryDrawer,
+  clearHistory: () => {
+    saveHistory([]);
+    updateHistoryCount();
+    renderHistoryList();
+  },
+};

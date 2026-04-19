@@ -39,7 +39,7 @@ def test_apply_verdict_modes():
     block_report = mirror.MirrorReport(confidence_score=10, verdict="block")
 
     assert mirror.apply_verdict(original, pass_report) == original
-    assert mirror.apply_verdict(original, warn_report) == original
+    assert "first-aid guidance only" in mirror.apply_verdict(original, warn_report)
     assert "not confident enough" in mirror.apply_verdict(original, block_report)
 
 

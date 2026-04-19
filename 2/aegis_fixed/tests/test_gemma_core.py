@@ -1,7 +1,4 @@
 import requests
-import time
-
-import pytest
 
 from aegis.core import gemma_core
 
@@ -17,16 +14,6 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
-
-
-@pytest.fixture(autouse=True)
-def _reset_cloud_failure_state(monkeypatch):
-    gemma_core._cloud_failure_state["consecutive_failures"] = 0
-    gemma_core._cloud_failure_state["cooldown_until"] = 0.0
-    gemma_core._cloud_failure_state["last_error"] = ""
-    monkeypatch.delenv("AEGIS_CLOUD_FAILURE_COOLDOWN_SEC", raising=False)
-    monkeypatch.delenv("AEGIS_CLOUD_FAILURE_THRESHOLD", raising=False)
-    monkeypatch.delenv("AEGIS_CLOUD_COOLDOWN_ENABLED", raising=False)
 
 
 def test_extract_chat_text():
@@ -96,54 +83,6 @@ def test_infer_online_cloud_fallback_to_local(monkeypatch):
     monkeypatch.setattr(gemma_core, "_infer_local", lambda *_args, **_kwargs: "local fallback")
 
     assert gemma_core.infer("sys", "user").response == "local fallback"
-
-
-def test_infer_enters_cooldown_after_repeated_cloud_failures(monkeypatch):
-    monkeypatch.setenv("AEGIS_CLOUD_FAILURE_THRESHOLD", "2")
-    monkeypatch.setenv("AEGIS_CLOUD_FAILURE_COOLDOWN_SEC", "60")
-
-    monkeypatch.setattr(gemma_core.compute_router, "get_status", lambda: {"mode": "online", "is_online": True, "ram_gb": 8.0})
-    monkeypatch.setattr(gemma_core, "_cloud_is_configured", lambda: True)
-    monkeypatch.setattr(gemma_core, "_infer_local", lambda *_args, **_kwargs: "local fallback")
-
-    calls = {"cloud": 0}
-
-    def _boom(*_args, **_kwargs):
-        calls["cloud"] += 1
-        raise RuntimeError("cloud failed")
-
-    monkeypatch.setattr(gemma_core, "_infer_cloud", _boom)
-
-    # First failure: fallback without cooldown.
-    assert gemma_core.infer("sys", "user").response == "local fallback"
-    assert calls["cloud"] == 1
-
-    # Second consecutive failure: enters cooldown.
-    assert gemma_core.infer("sys", "user").response == "local fallback"
-    assert calls["cloud"] == 2
-    assert gemma_core.get_model_info()["cloud_cooldown_remaining_sec"] > 0
-
-    # Third request while in cooldown: skips cloud attempt and falls back quickly.
-    assert gemma_core.infer("sys", "user").response == "local fallback"
-    assert calls["cloud"] == 2
-
-
-def test_force_cloud_with_fallback_disabled_bypasses_cooldown(monkeypatch):
-    monkeypatch.setenv("AEGIS_ONLINE_FALLBACK_TO_LOCAL", "0")
-    monkeypatch.setattr(gemma_core.compute_router, "get_status", lambda: {"mode": "online", "is_online": True, "ram_gb": 8.0})
-    monkeypatch.setattr(gemma_core, "_cloud_is_configured", lambda: True)
-
-    gemma_core._cloud_failure_state["cooldown_until"] = time.time() + 120
-    gemma_core._cloud_failure_state["last_error"] = "prior timeout"
-
-    monkeypatch.setattr(gemma_core, "_infer_cloud", lambda *_args, **_kwargs: "cloud ok")
-    monkeypatch.setattr(gemma_core, "_infer_local", lambda *_args, **_kwargs: "local fallback")
-
-    result = gemma_core.infer("sys", "user", force_cloud=True)
-
-    assert result.response == "cloud ok"
-    assert gemma_core.get_model_info()["cloud_cooldown_remaining_sec"] == 0
-    assert gemma_core.get_model_info()["cloud_last_error"] == ""
 
 
 def test_load_model_returns_unreachable(monkeypatch):

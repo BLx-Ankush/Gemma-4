@@ -15,33 +15,11 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_cors import CORS
 
-BASE_DIR = Path(__file__).resolve().parent
-
-
-def _load_env_file(env_path: Path) -> None:
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key:
-            continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-            value = value[1:-1]
-        os.environ.setdefault(key, value)
-
-
-# Ensure .env is available before importing modules that read env at import time.
-_load_env_file(BASE_DIR / ".env")
-
 from aegis.core import compute_router, gemma_core, mirror
 from aegis.modules import veda, voice_handler
 
 
+BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 IMAGE_UPLOADS_DIR = UPLOADS_DIR / "images"
@@ -50,13 +28,6 @@ REQUEST_TIMEOUT_SEC = max(10, int(os.environ.get("AEGIS_REQUEST_TIMEOUT_SEC", "3
 _REQUEST_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 APP_STARTED_AT = int(time.time())
 APP_BUILD_ID = os.environ.get("AEGIS_BUILD_ID", "2026-04-11-r2")
-
-
-def _safe_timeout_from_env(name: str, fallback_sec: int) -> int:
-    try:
-        return max(10, int(os.environ.get(name, str(fallback_sec))))
-    except Exception:
-        return max(10, int(fallback_sec))
 
 
 def _run_with_timeout(func, timeout_sec: int):
@@ -141,7 +112,7 @@ def create_app() -> Flask:
     # ── Main UI ───────────────────────────────────────────────────────────────
     @app.route("/")
     def index():
-        return render_template("index.html", cache_bust=int(time.time()))
+        return render_template("index.html")
 
     # ── Status / health ───────────────────────────────────────────────────────
     @app.route("/api/health", methods=["GET"])
@@ -151,8 +122,6 @@ def create_app() -> Flask:
         # Only /status triggers a real refresh; inference routes use get_status()
         compute = compute_router.force_refresh()
         model_info = gemma_core.get_model_info()
-        veda_timeout_sec = _safe_timeout_from_env("AEGIS_VEDA_REQUEST_TIMEOUT_SEC", REQUEST_TIMEOUT_SEC)
-        voice_timeout_sec = _safe_timeout_from_env("AEGIS_VOICE_REQUEST_TIMEOUT_SEC", REQUEST_TIMEOUT_SEC)
         return jsonify(
             {
                 "ok": True,
@@ -162,11 +131,6 @@ def create_app() -> Flask:
                     "build_id": APP_BUILD_ID,
                     "pid": os.getpid(),
                     "started_at": APP_STARTED_AT,
-                    "timeouts": {
-                        "default_request_sec": REQUEST_TIMEOUT_SEC,
-                        "veda_request_sec": veda_timeout_sec,
-                        "voice_request_sec": voice_timeout_sec,
-                    },
                 },
             }
         )
@@ -204,7 +168,10 @@ def create_app() -> Flask:
         if not text_query and not audio_path:
             return jsonify({"ok": False, "error": "Provide either 'text' or 'audio'."}), 400
 
-        timeout_sec = _safe_timeout_from_env("AEGIS_VEDA_REQUEST_TIMEOUT_SEC", REQUEST_TIMEOUT_SEC)
+        timeout_sec = max(
+            10,
+            int(os.environ.get("AEGIS_VEDA_REQUEST_TIMEOUT_SEC", str(REQUEST_TIMEOUT_SEC))),
+        )
 
         try:
             result = _run_with_timeout(
@@ -232,7 +199,7 @@ def create_app() -> Flask:
                         "audit_time_ms": result.mirror_report.audit_time_ms,
                     },
                     "audio_response_data_url": _audio_to_data_url(result.audio_response_path),
-                    "mode": compute_router.refresh()["mode"],
+                    "mode": compute_router.get_status()["mode"],
                 },
             })
         except TimeoutError as exc:
@@ -284,7 +251,10 @@ def create_app() -> Flask:
         if image_file and image_file.filename:
             image_path = _save_upload(image_file, IMAGE_UPLOADS_DIR)
 
-        timeout_sec = _safe_timeout_from_env("AEGIS_VOICE_REQUEST_TIMEOUT_SEC", REQUEST_TIMEOUT_SEC)
+        timeout_sec = max(
+            10,
+            int(os.environ.get("AEGIS_VOICE_REQUEST_TIMEOUT_SEC", str(REQUEST_TIMEOUT_SEC))),
+        )
 
         try:
             result = _run_with_timeout(
@@ -297,7 +267,7 @@ def create_app() -> Flask:
                 timeout_sec,
             )
             result["audio_response_data_url"] = _audio_to_data_url(result.get("audio_response_path", ""))
-            result["mode"] = compute_router.refresh()["mode"]
+            result["mode"] = compute_router.get_status()["mode"]
             return jsonify({"ok": True, "data": result})
         except TimeoutError as exc:
             return jsonify({"ok": False, "error": str(exc), "timeout": True}), 504
@@ -313,7 +283,7 @@ app = create_app()
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run AEGIS Flask server")
     parser.add_argument("--host", default=os.environ.get("AEGIS_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("AEGIS_APP_PORT", "5000")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("AEGIS_PORT", "5000")))
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 

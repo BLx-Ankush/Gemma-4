@@ -23,7 +23,6 @@ def test_offline_path_skips_cloud(monkeypatch):
 
 
 def test_veda_returns_safe_fallback_on_pipeline_error(monkeypatch):
-    monkeypatch.setattr(veda, "ENABLE_TEXT_TTS", True)
     monkeypatch.setattr(veda.gemma_core, "infer", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("engine down")))
     monkeypatch.setattr(veda.voice_utils, "speak_to_file", lambda _text: "tmp/fallback.wav")
 

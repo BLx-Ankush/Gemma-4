@@ -35,47 +35,17 @@ class _FakeWhisperModel:
         return [_Segment("hello"), _Segment("world")], _Info()
 
 
-def test_speak_to_file_uses_google_provider(monkeypatch, tmp_path):
-    monkeypatch.setenv("AEGIS_TTS_PROVIDER", "google_ai_studio")
+def test_speak_to_file_writes_file(monkeypatch, tmp_path):
+    fake_engine = _FakeTtsEngine()
+    monkeypatch.setattr(voice_utils, "_tts_engine", fake_engine)
+    monkeypatch.setattr(voice_utils, "init_tts", lambda: None)
 
     output_path = tmp_path / "reply.wav"
-
-    def _fake_google_tts(text, output):
-        assert text == "test response"
-        Path(output).write_bytes(b"RIFF")
-        return str(output)
-
-    monkeypatch.setattr(voice_utils, "_speak_with_google_ai_studio", _fake_google_tts)
-
     result = voice_utils.speak_to_file("test response", str(output_path))
 
     assert result == str(output_path)
     assert output_path.exists()
-
-
-def test_speak_to_file_google_falls_back_to_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("AEGIS_TTS_PROVIDER", "google_ai_studio")
-    monkeypatch.setenv("AEGIS_GOOGLE_TTS_FALLBACK_LOCAL", "1")
-
-    output_path = tmp_path / "fallback.wav"
-
-    monkeypatch.setattr(
-        voice_utils,
-        "_speak_with_google_ai_studio",
-        lambda _text, _output: (_ for _ in ()).throw(RuntimeError("google down")),
-    )
-
-    def _fake_local_tts(text, output):
-        assert text == "fallback response"
-        Path(output).write_bytes(b"RIFF")
-        return str(output)
-
-    monkeypatch.setattr(voice_utils, "_speak_with_local_pyttsx3", _fake_local_tts)
-
-    result = voice_utils.speak_to_file("fallback response", str(output_path))
-
-    assert result == str(output_path)
-    assert output_path.exists()
+    assert fake_engine.last_text == "test response"
 
 
 def test_transcribe_returns_structured_result(monkeypatch, tmp_path):

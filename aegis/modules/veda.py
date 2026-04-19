@@ -4,6 +4,7 @@ from aegis.core import gemma_core, mirror
 from aegis.core.prompts import build_veda_prompt
 from . import drug_lookup, voice_utils
 import os
+import re
 import time
 
 
@@ -22,24 +23,62 @@ class VedaResult:
 
 
 LANGUAGE_MAP = {
-    "en": "English",
-    "hi": "Hindi",
-    "ta": "Tamil",
-    "es": "Spanish",
-    "fr": "French",
-    "sw": "Swahili",
-    "ar": "Arabic",
-    "pt": "Portuguese",
-    "zh": "Chinese",
-    "bn": "Bengali",
-    "ur": "Urdu",
-    "te": "Telugu",
-    "mr": "Marathi",
-    "gu": "Gujarati",
-    "kn": "Kannada",
-    "ml": "Malayalam",
+    "en": "English", "hi": "Hindi", "ta": "Tamil",
+    "es": "Spanish", "fr": "French", "sw": "Swahili",
+    "ar": "Arabic", "pt": "Portuguese", "zh": "Chinese",
+    "bn": "Bengali", "ur": "Urdu", "te": "Telugu",
+    "mr": "Marathi", "gu": "Gujarati", "kn": "Kannada", "ml": "Malayalam",
 }
 
+LANGUAGE_ALIASES = {
+    "english": "English",
+    "hindi": "Hindi",
+    "kannada": "Kannada",
+    "tamil": "Tamil",
+    "telugu": "Telugu",
+    "bengali": "Bengali",
+    "marathi": "Marathi",
+    "gujarati": "Gujarati",
+    "malayalam": "Malayalam",
+    "urdu": "Urdu",
+    "arabic": "Arabic",
+    "spanish": "Spanish",
+    "french": "French",
+    "swahili": "Swahili",
+    "portuguese": "Portuguese",
+    "chinese": "Chinese",
+}
+
+SCRIPT_REGEX = {
+    "arabic": re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]"),
+    "devanagari": re.compile(r"[\u0900-\u097F]"),
+    "latin": re.compile(r"[A-Za-z]"),
+}
+
+INTERNAL_REASONING_HINTS = (
+    "the user has",
+    "the user hasn't",
+    "the user has not",
+    "the prompt",
+    "system instructions",
+    "output rules",
+    "self-correction",
+    "refined plan",
+    "final decision",
+    "alternative interpretation",
+    "hidden medical request",
+    "system check",
+    "refining based on",
+    "persona",
+    "alternative:",
+    "response:",
+    "let's",
+    "i should",
+    "i will",
+    "i need to",
+    "wait,",
+    "*wait*",
+)
 
 SAFE_FALLBACK_MESSAGES = {
     "English": "I cannot safely process this request right now. Please seek help from a nearby health worker or emergency service immediately.",
@@ -60,15 +99,117 @@ def _is_env_enabled(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-VEDA_MAX_TOKENS = max(32, min(_safe_int_env("AEGIS_VEDA_MAX_TOKENS", 32), 128))
+VEDA_MAX_TOKENS = max(48, min(_safe_int_env("AEGIS_VEDA_MAX_TOKENS", 96), 256))
 SYNC_MIRROR_MAX_MODEL_MS = max(0, _safe_int_env("AEGIS_SYNC_MIRROR_MAX_MODEL_MS", 12000))
-ENABLE_TEXT_TTS = _is_env_enabled("AEGIS_ENABLE_TEXT_TTS", False)
+
+ENABLE_TEXT_TTS = _is_env_enabled("AEGIS_ENABLE_TEXT_TTS", True)
 ENABLE_VOICE_TTS = _is_env_enabled("AEGIS_ENABLE_VOICE_TTS", True)
 TTS_MAX_CHARS = max(120, _safe_int_env("AEGIS_TTS_MAX_CHARS", 500))
+ENABLE_RESPONSE_LANGUAGE_REWRITE = _is_env_enabled("AEGIS_ENABLE_RESPONSE_LANGUAGE_REWRITE", True)
+ENABLE_VOICE_LANGUAGE_REWRITE = _is_env_enabled("AEGIS_ENABLE_VOICE_LANGUAGE_REWRITE", False)
+LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS = max(
+    0,
+    _safe_int_env("AEGIS_LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS", 18000),
+)
 
 
 def _safe_fallback_message(language: str) -> str:
     return SAFE_FALLBACK_MESSAGES.get(language, SAFE_FALLBACK_MESSAGES["English"])
+
+
+def _normalize_language_name(language: str) -> str:
+    raw = (language or "").strip()
+    if not raw:
+        return "English"
+
+    lowered = raw.lower()
+    if lowered in LANGUAGE_MAP:
+        return LANGUAGE_MAP[lowered]
+    if lowered in LANGUAGE_ALIASES:
+        return LANGUAGE_ALIASES[lowered]
+    return raw
+
+
+def _script_counts(text: str) -> dict:
+    sample = text or ""
+    return {
+        "arabic": len(SCRIPT_REGEX["arabic"].findall(sample)),
+        "devanagari": len(SCRIPT_REGEX["devanagari"].findall(sample)),
+        "latin": len(SCRIPT_REGEX["latin"].findall(sample)),
+    }
+
+
+def _adjust_detected_language_from_transcript(language: str, transcript: str) -> str:
+    normalized = _normalize_language_name(language)
+    counts = _script_counts(transcript)
+
+    # Whisper can sometimes classify Urdu/Hindustani speech as Hindi while transcript is Arabic-script.
+    if normalized == "Hindi" and counts["arabic"] >= 4 and counts["arabic"] > counts["devanagari"]:
+        return "Urdu"
+
+    return normalized
+
+
+def _has_language_script_mismatch(text: str, language: str) -> bool:
+    normalized = _normalize_language_name(language)
+    counts = _script_counts(text)
+
+    if normalized == "Hindi":
+        return counts["arabic"] >= max(6, counts["devanagari"] * 2)
+    if normalized in {"Urdu", "Arabic"}:
+        return counts["devanagari"] >= max(6, counts["arabic"] * 2)
+    return False
+
+
+def _reconcile_detected_language_with_response(language: str, response_text: str) -> str:
+    normalized = _normalize_language_name(language)
+    counts = _script_counts(response_text)
+
+    if normalized == "Hindi" and counts["arabic"] >= 6 and counts["arabic"] > counts["devanagari"]:
+        return "Urdu"
+    if normalized in {"Urdu", "Arabic"} and counts["devanagari"] >= 6 and counts["devanagari"] > counts["arabic"]:
+        return "Hindi"
+    return normalized
+
+
+def _rewrite_response_in_language(response_text: str, language: str) -> str:
+    target_language = _normalize_language_name(language)
+    rewrite_system_prompt = (
+        "You are AEGIS translation guard. Rewrite the guidance below in "
+        f"{target_language}. Keep all medical meaning, dosage numbers, and step order unchanged. "
+        "Return only the rewritten user-facing answer."
+    )
+
+    if target_language == "Hindi":
+        rewrite_system_prompt += " Use Devanagari script only."
+    elif target_language == "Urdu":
+        rewrite_system_prompt += " Use Urdu (Perso-Arabic) script."
+    elif target_language == "Arabic":
+        rewrite_system_prompt += " Use Arabic script."
+
+    infer_result = gemma_core.infer(
+        rewrite_system_prompt,
+        response_text,
+        image_path=None,
+        max_tokens=VEDA_MAX_TOKENS,
+    )
+    return _sanitize_model_response(infer_result.response)
+
+
+def _enforce_response_language(response_text: str, language: str) -> str:
+    if not response_text:
+        return response_text
+    if not _has_language_script_mismatch(response_text, language):
+        return response_text
+
+    try:
+        rewritten = _rewrite_response_in_language(response_text, language)
+    except Exception:
+        return response_text
+
+    if rewritten and not _has_language_script_mismatch(rewritten, language):
+        return rewritten
+    return rewritten or response_text
 
 
 def build_system_prompt(language: str = "English", drug_context: str = "") -> str:
@@ -86,6 +227,132 @@ def _trim_for_tts(text: str) -> str:
     return cleaned[:TTS_MAX_CHARS].rstrip() + "..."
 
 
+def _is_meta_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+
+    lowered = stripped.lower().lstrip("* ")
+    meta_prefixes = [
+        "user message:",
+        "persona:",
+        "goal:",
+        "constraints:",
+        "language:",
+        "step 1:",
+        "step 2:",
+        "step 3:",
+        "step 4:",
+        "step 5:",
+    ]
+    if any(lowered.startswith(prefix) for prefix in meta_prefixes):
+        return True
+
+    if "output rules" in lowered or "check against" in lowered:
+        return True
+
+    if re.match(
+        r'^[*\-\s]*check\s+["\']?(specific actions|likely cause|warning sign|professional care|3-5 numbered steps|short acknowledgment|english)["\']?\s*:',
+        lowered,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if "no analysis" in lowered and "no labels" in lowered:
+        return True
+
+    if re.match(
+        r'^(english\?|short acknowledgment\?|3-5 numbered steps\?|specific actions\?|likely cause\?|warning sign\?|professional care at the end\?|no "?i cannot"?)\s*:\s*yes\.?$',
+        lowered,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if re.match(
+        r"^[*\-\s]*[a-z0-9 ,/\"'()\-]{3,70}\?\s*(yes|no)\.?$",
+        stripped,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if re.match(r"^[*\-\s]*\*{1,2}[a-z][a-z0-9\s\-/]{2,45}\*{1,2}\s*:", stripped, flags=re.IGNORECASE):
+        return True
+
+    if any(hint in lowered for hint in INTERNAL_REASONING_HINTS):
+        return True
+
+    if re.match(r"^[*\-\s]*\*?(wait|actually|self-correction|refined plan|final decision|alternative interpretation)\*?[:\-]?", stripped, flags=re.IGNORECASE):
+        return True
+
+    if re.match(r'^["\']\s*hello[^"\']+["\']\s*$', stripped, flags=re.IGNORECASE):
+        return True
+
+    return False
+
+
+def _sanitize_model_response(text: str) -> str:
+    cleaned = (text or "").replace("\r\n", "\n").strip()
+    if not cleaned:
+        return ""
+
+    lines = cleaned.split("\n")
+    has_meta_lines = any(_is_meta_line(line) for line in lines)
+    leaked_markers = ("user message:", "persona:", "constraints:", "goal:")
+    has_leaked_markers = any(marker in cleaned.lower() for marker in leaked_markers)
+    if not has_leaked_markers and not has_meta_lines:
+        return cleaned
+
+    # If a compliance checklist exists, start from the first line after the checklist block.
+    checklist_indices = []
+    if has_leaked_markers:
+        checklist_indices = [
+            i for i, line in enumerate(lines)
+            if re.search(
+                r'english\?|short acknowledgment\?|3-5 numbered steps\?|specific actions\?|likely cause\?|warning sign\?|professional care at the end\?|no "?i cannot"?',
+                line,
+                flags=re.IGNORECASE,
+            )
+        ]
+    start_idx = checklist_indices[-1] + 1 if checklist_indices else 0
+
+    if start_idx == 0:
+        seen_meta = False
+        for i, line in enumerate(lines):
+            if _is_meta_line(line):
+                seen_meta = True
+                continue
+            if seen_meta and line.strip() and not _is_meta_line(line):
+                start_idx = i
+                break
+
+    filtered_lines = []
+    for line in lines[start_idx:]:
+        if _is_meta_line(line):
+            continue
+        filtered_lines.append(line)
+
+    # Remove leaked rubric bullets at the top when the actual answer follows.
+    while filtered_lines:
+        first = filtered_lines[0].strip()
+        if not first.startswith("*"):
+            break
+        has_non_bullet_after = any(
+            ln.strip() and not ln.strip().startswith("*")
+            for ln in filtered_lines[1:]
+        )
+        if not has_non_bullet_after:
+            break
+        filtered_lines.pop(0)
+
+    result = "\n".join(filtered_lines).strip()
+    if not result:
+        return cleaned
+
+    # Normalize excessive blank spacing from removed scaffolding.
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
+
 def process_medical_query(
     image_path: Optional[str] = None,
     audio_path: Optional[str] = None,
@@ -99,7 +366,7 @@ def process_medical_query(
         raise ValueError("Either audio_path or text_query must be provided")
 
     transcript = ""
-    detected_language = language
+    detected_language = _normalize_language_name(language)
     query_text = text_query or ""
     drug_context = ""
     raw_response = ""
@@ -110,7 +377,10 @@ def process_medical_query(
             transcription = voice_utils.transcribe(audio_path)
             transcript = transcription.text
             query_text = transcript
-            detected_language = LANGUAGE_MAP.get(transcription.language, transcription.language)
+            detected_language = _normalize_language_name(
+                LANGUAGE_MAP.get(transcription.language, transcription.language)
+            )
+            detected_language = _adjust_detected_language_from_transcript(detected_language, transcript)
 
         drug_context = drug_lookup.get_drug_context(query_text)
         system_prompt = build_system_prompt(detected_language, drug_context)
@@ -126,10 +396,10 @@ def process_medical_query(
             image_path,
             max_tokens=VEDA_MAX_TOKENS,
         )
-        raw_response = infer_result.response
+        raw_response = _sanitize_model_response(infer_result.response)
         model_latency_ms = infer_result.latency_ms
 
-        image_context = f"Image: {image_path}" if image_path else ""
+        image_context = f"Image: {image_path}" if image_path else "No image provided"
         if model_latency_ms > SYNC_MIRROR_MAX_MODEL_MS:
             mirror_report = mirror.MirrorReport(
                 confidence_score=70,
@@ -142,8 +412,27 @@ def process_medical_query(
                 audit_time_ms=0,
             )
         else:
-            mirror_report = mirror.audit(query=query_text, response=raw_response, image_context=image_context)
-        response_text = mirror.apply_verdict(raw_response, mirror_report, detected_language)
+            mirror_report = mirror.audit(
+                query=query_text,
+                response=raw_response,
+                image_context=image_context,
+            )
+        response_text = _sanitize_model_response(
+            mirror.apply_verdict(raw_response, mirror_report, detected_language)
+        )
+        should_rewrite_language = (
+            ENABLE_RESPONSE_LANGUAGE_REWRITE
+            and (audio_path is None or ENABLE_VOICE_LANGUAGE_REWRITE)
+            and model_latency_ms <= LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS
+        )
+        if should_rewrite_language:
+            response_text = _enforce_response_language(response_text, detected_language)
+
+        response_text = _sanitize_model_response(response_text)
+        if not response_text:
+            response_text = _safe_fallback_message(detected_language)
+
+        detected_language = _reconcile_detected_language_with_response(detected_language, response_text)
 
     except Exception as exc:
         response_text = _safe_fallback_message(detected_language)
@@ -162,7 +451,7 @@ def process_medical_query(
         except Exception:
             audio_response_path = ""
 
-    processing_time_ms = model_latency_ms or int((time.time() - start_time) * 1000)
+    processing_time_ms = int((time.time() - start_time) * 1000)
     return VedaResult(
         transcript=transcript,
         detected_language=detected_language,
@@ -179,39 +468,6 @@ def process_medical_query(
 
 def process_text_only(text_query: str, language: str = "English") -> VedaResult:
     return process_medical_query(
-        image_path=None,
-        audio_path=None,
-        text_query=text_query,
-        language=language,
-        session_id=None,
-    )
-
-
-if __name__ == "__main__":
-    print("=" * 50)
-    print("AEGIS VEDA Module — Full Pipeline Test")
-    print("=" * 50)
-
-    print("\n--- Test 1: Text query, no image ---")
-    result = process_text_only("I burned my hand on a hot pot. What should I do?")
-    print(f"Response: {result.response_text}")
-    print(
-        f"MIRROR: confidence={result.mirror_report.confidence_score}, verdict={result.mirror_report.verdict}"
-    )
-    print(f"Drug context: {result.drug_context or 'None'}")
-    print(f"Processing time: {result.processing_time_ms}ms")
-
-    print("\n--- Test 2: Drug query ---")
-    result = process_text_only("Can I give paracetamol to my child who has a fever?")
-    print(f"Response: {result.response_text}")
-    print(f"Drug context found: {'Yes' if result.drug_context else 'No'}")
-    print(
-        f"MIRROR: confidence={result.mirror_report.confidence_score}, verdict={result.mirror_report.verdict}"
-    )
-
-    print("\n--- Test 3: Edge case query ---")
-    result = process_text_only("I have severe chest pain and difficulty breathing")
-    print(f"Response: {result.response_text}")
-    print(
-        f"MIRROR: confidence={result.mirror_report.confidence_score}, verdict={result.mirror_report.verdict}, flags={result.mirror_report.flags}"
+        image_path=None, audio_path=None,
+        text_query=text_query, language=language, session_id=None,
     )

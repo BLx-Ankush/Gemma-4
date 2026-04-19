@@ -85,33 +85,6 @@ def parse_mirror_response(raw_response: str) -> MirrorReport:
             if number_after_conf:
                 report.confidence_score = max(0, min(100, int(number_after_conf.group(1))))
 
-        # Heuristic fallback for loosely formatted audits.
-        lower = cleaned.lower()
-        if "harm: no" not in lower and (
-            "dangerous" in lower
-            or "potential harm" in lower
-            or "direct harm" in lower
-            or re.search(r"\bharm\b", lower)
-        ):
-            if "potential_harm" not in report.flags:
-                report.flags.append("potential_harm")
-
-        if "hallucination: no" not in lower and "hallucin" in lower:
-            if "possible_hallucination" not in report.flags:
-                report.flags.append("possible_hallucination")
-
-        if "overdiagnosis: no" not in lower and "overdiagnos" in lower:
-            if "overdiagnosis" not in report.flags:
-                report.flags.append("overdiagnosis")
-
-        if "scope: within scope" not in lower and (
-            "scope overstepped" in lower
-            or "out of scope" in lower
-            or "overstep" in lower
-        ):
-            if "scope_overstepped" not in report.flags:
-                report.flags.append("scope_overstepped")
-
         # Infer verdict from score if VERDICT line was missing
         if not saw_verdict:
             if report.confidence_score < 30 or len(report.flags) >= 2:

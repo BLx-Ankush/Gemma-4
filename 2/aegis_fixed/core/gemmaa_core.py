@@ -12,7 +12,9 @@ MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "gemma4-e2b.gguf")
 MMPROJ_PATH = os.path.join(MODEL_DIR, "mmproj-gemma4-e2b.gguf")
 
-MAX_TOKENS = int(os.environ.get("AEGIS_MAX_TOKENS", "128"))
+# FIX 1: Raised default from 96 to 256. 96 was too low for medical responses.
+# MIRROR overrides this with max_tokens=96 explicitly.
+MAX_TOKENS = int(os.environ.get("AEGIS_MAX_TOKENS", "256"))
 TEMPERATURE = 0.3
 
 _last_backend = "none"
@@ -30,12 +32,6 @@ class InferResult:
 _llama_health_cache: Dict[str, Any] = {
     "reachable": False,
     "checked_at": 0.0,
-}
-
-_cloud_failure_state: Dict[str, Any] = {
-    "consecutive_failures": 0,
-    "cooldown_until": 0.0,
-    "last_error": "",
 }
 
 
@@ -107,11 +103,11 @@ def _extract_completion_text(payload: Dict[str, Any]) -> str:
 
 
 def _get_local_config() -> Dict[str, Any]:
-    timeout_raw = os.environ.get("AEGIS_LOCAL_TIMEOUT_SEC", "35")
+    timeout_raw = os.environ.get("AEGIS_LOCAL_TIMEOUT_SEC", "90")
     try:
         timeout = float(timeout_raw)
     except ValueError:
-        timeout = 35.0
+        timeout = 90.0
 
     base_url = os.environ.get("AEGIS_LOCAL_LLM_URL", "http://127.0.0.1:8080").rstrip("/")
     return {
@@ -120,7 +116,8 @@ def _get_local_config() -> Dict[str, Any]:
         "chat_path": os.environ.get("AEGIS_LOCAL_CHAT_PATH", "/v1/chat/completions"),
         "completion_path": os.environ.get("AEGIS_LOCAL_COMPLETION_PATH", "/completion"),
         "model_label": os.environ.get("AEGIS_LOCAL_MODEL_LABEL", "gemma4-e2b-turboquant"),
-        "timeout": max(1.0, min(timeout, 45.0)),
+        # FIX 2: Removed the min(..., 45) cap. Offline CPU inference needs 90s.
+        "timeout": max(1.0, timeout),
     }
 
 
@@ -145,71 +142,6 @@ def _get_cloud_config() -> Dict[str, Any]:
 def _cloud_is_configured() -> bool:
     config = _get_cloud_config()
     return bool(config["api_url"] and config["api_key"])
-
-
-def _is_env_enabled(name: str, default: bool) -> bool:
-    raw = os.environ.get(name, "1" if default else "0").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _safe_float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name, str(default)).strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        value = default
-    return max(0.0, value)
-
-
-def _safe_int_env(name: str, default: int, minimum: int = 0) -> int:
-    raw = os.environ.get(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        value = default
-    return max(minimum, value)
-
-
-def _get_cloud_failure_policy() -> Dict[str, Any]:
-    cooldown_sec = _safe_float_env("AEGIS_CLOUD_FAILURE_COOLDOWN_SEC", 25.0)
-    threshold = _safe_int_env("AEGIS_CLOUD_FAILURE_THRESHOLD", 2, minimum=1)
-    enabled = _is_env_enabled("AEGIS_CLOUD_COOLDOWN_ENABLED", True) and cooldown_sec > 0
-    return {
-        "enabled": enabled,
-        "cooldown_sec": cooldown_sec,
-        "threshold": threshold,
-    }
-
-
-def _get_cloud_cooldown_remaining_sec(now: Optional[float] = None) -> float:
-    current = now if now is not None else time.time()
-    remaining = float(_cloud_failure_state.get("cooldown_until", 0.0)) - current
-    return max(0.0, remaining)
-
-
-def _register_cloud_success() -> None:
-    _cloud_failure_state["consecutive_failures"] = 0
-    _cloud_failure_state["cooldown_until"] = 0.0
-    _cloud_failure_state["last_error"] = ""
-
-
-def _register_cloud_failure(exc: Exception) -> Dict[str, Any]:
-    policy = _get_cloud_failure_policy()
-    _cloud_failure_state["last_error"] = str(exc)
-    _cloud_failure_state["consecutive_failures"] = int(_cloud_failure_state["consecutive_failures"]) + 1
-
-    entered_cooldown = False
-    if policy["enabled"] and _cloud_failure_state["consecutive_failures"] >= int(policy["threshold"]):
-        _cloud_failure_state["cooldown_until"] = time.time() + float(policy["cooldown_sec"])
-        _cloud_failure_state["consecutive_failures"] = 0
-        entered_cooldown = True
-
-    return {
-        "entered_cooldown": entered_cooldown,
-        "cooldown_sec": float(policy["cooldown_sec"]),
-        "threshold": int(policy["threshold"]),
-        "remaining_failures": int(_cloud_failure_state["consecutive_failures"]),
-    }
 
 
 def _get_llama_health() -> bool:
@@ -260,8 +192,10 @@ def _infer_local(
     config = _get_local_config()
     timeout = config["timeout"]
 
+    # FIX 3: Removed the hard cap of min(token_budget, 128).
+    # VEDA needs 256 tokens. MIRROR passes 96 explicitly. Both work now.
     token_budget = int(max_tokens) if max_tokens else MAX_TOKENS
-    token_budget = max(32, min(token_budget, 192))
+    token_budget = max(32, token_budget)
 
     chat_payload: Dict[str, Any] = {
         "model": config["model_label"],
@@ -299,6 +233,8 @@ def _infer_local(
         return text
     except requests.exceptions.Timeout as exc:
         raise RuntimeError(f"Local chat endpoint timed out after {timeout}s") from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise RuntimeError("Local chat endpoint is unreachable — is llama-server running?") from exc
     except Exception as exc:
         chat_error = exc
 
@@ -358,8 +294,9 @@ def _infer_cloud(
     image_path: Optional[str] = None,
     max_tokens: Optional[int] = None,
 ) -> str:
+    # FIX 4: Removed the hard cap of min(token_budget, 128) for cloud too.
     token_budget = int(max_tokens) if max_tokens else MAX_TOKENS
-    token_budget = max(32, min(token_budget, 192))
+    token_budget = max(32, token_budget)
 
     global _last_backend
     config = _get_cloud_config()
@@ -371,7 +308,16 @@ def _infer_cloud(
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}key={config['api_key']}"
 
-    message_parts: List[Dict[str, Any]] = [{"text": user_message}]
+    message_parts: List[Dict[str, Any]] = [
+        {
+            "text": (
+                "System instructions:\n"
+                f"{system_prompt}\n\n"
+                "User message:\n"
+                f"{user_message}"
+            )
+        }
+    ]
 
     if image_path and os.path.exists(image_path):
         mime_type, image_b64 = _encode_image_for_payload(image_path)
@@ -379,9 +325,7 @@ def _infer_cloud(
             {"inline_data": {"mime_type": mime_type, "data": image_b64}}
         )
 
-    # Prefer structured system instruction so the model is less likely to echo prompt scaffolding.
     request_payload = {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": message_parts}],
         "generationConfig": {
             "temperature": TEMPERATURE,
@@ -395,31 +339,6 @@ def _infer_cloud(
         data=json.dumps(request_payload),
         timeout=config["timeout"],
     )
-
-    if response.status_code >= 400:
-        # Compatibility fallback for backends that do not support systemInstruction.
-        legacy_parts: List[Dict[str, Any]] = [
-            {"text": f"{system_prompt}\n\n{user_message}"}
-        ]
-        if image_path and os.path.exists(image_path):
-            mime_type, image_b64 = _encode_image_for_payload(image_path)
-            legacy_parts.append(
-                {"inline_data": {"mime_type": mime_type, "data": image_b64}}
-            )
-        legacy_payload = {
-            "contents": [{"role": "user", "parts": legacy_parts}],
-            "generationConfig": {
-                "temperature": TEMPERATURE,
-                "maxOutputTokens": token_budget,
-            },
-        }
-        response = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(legacy_payload),
-            timeout=config["timeout"],
-        )
-
     response.raise_for_status()
     payload = cast(Dict[str, Any], response.json())
     result_text = _extract_cloud_text(payload)
@@ -436,65 +355,29 @@ def infer(
 ) -> InferResult:
     start_time = time.time()
     effective_tokens = int(max_tokens) if max_tokens else MAX_TOKENS
-    effective_tokens = max(32, min(effective_tokens, 192))
+    effective_tokens = max(32, effective_tokens)
     status = compute_router.get_status()
     has_vision = bool(image_path and os.path.exists(image_path or ""))
     online_cloud_mode = status["mode"] == "online" and _cloud_is_configured()
-    allow_local_fallback = _is_env_enabled("AEGIS_ONLINE_FALLBACK_TO_LOCAL", True)
-    cooldown_remaining_sec = _get_cloud_cooldown_remaining_sec()
-    cloud_cooldown_active = cooldown_remaining_sec > 0
+    allow_local_fallback = os.environ.get("AEGIS_ONLINE_FALLBACK_TO_LOCAL", "1").strip() == "1"
 
     if force_cloud or online_cloud_mode:
-        if cloud_cooldown_active and not (force_cloud and not allow_local_fallback):
-            if online_cloud_mode and not allow_local_fallback:
-                raise RuntimeError(
-                    "Cloud inference is in temporary cooldown after repeated failures and "
-                    "online local fallback is disabled. "
-                    f"Retry in about {int(round(cooldown_remaining_sec))}s or set "
-                    "AEGIS_ONLINE_FALLBACK_TO_LOCAL=1."
-                )
-            print(
-                "[gemma_core] Cloud temporarily in cooldown "
-                f"({int(round(cooldown_remaining_sec))}s remaining); using local fallback."
+        try:
+            response_text = _infer_cloud(
+                system_prompt, user_message, image_path,
+                max_tokens=effective_tokens,
             )
-        else:
-            try:
-                response_text = _infer_cloud(
-                    system_prompt, user_message, image_path,
-                    max_tokens=effective_tokens,
-                )
-                _register_cloud_success()
-                return InferResult(
-                    response=response_text.strip(),
-                    model_used=_get_cloud_config()["model_label"],
-                    mode="online",
-                    latency_ms=int((time.time() - start_time) * 1000),
-                    has_vision=has_vision,
-                )
-            except Exception as exc:
-                failure_state = _register_cloud_failure(exc)
-                if force_cloud and not allow_local_fallback:
-                    raise RuntimeError(f"Cloud inference failed in force_cloud mode: {exc}") from exc
-
-                if online_cloud_mode and not allow_local_fallback:
-                    raise RuntimeError(
-                        "Cloud inference failed and online local fallback is disabled. "
-                        f"Set AEGIS_ONLINE_FALLBACK_TO_LOCAL=1 to allow local fallback. Root cause: {exc}"
-                    ) from exc
-
-                if failure_state["entered_cooldown"]:
-                    print(
-                        "[gemma_core] Cloud failed repeatedly; entering cooldown for "
-                        f"{int(round(float(failure_state['cooldown_sec'])))}s. "
-                        "Using local fallback."
-                    )
-                else:
-                    threshold = int(failure_state["threshold"])
-                    remaining = max(0, threshold - int(failure_state["remaining_failures"]))
-                    print(
-                        f"[gemma_core] Cloud failed ({exc}), falling back to local "
-                        f"({remaining} more failure(s) before cooldown)."
-                    )
+            return InferResult(
+                response=response_text.strip(),
+                model_used=_get_cloud_config()["model_label"],
+                mode="online",
+                latency_ms=int((time.time() - start_time) * 1000),
+                has_vision=has_vision,
+            )
+        except Exception as exc:
+            if force_cloud and not allow_local_fallback:
+                raise RuntimeError(f"Cloud inference failed in force_cloud mode: {exc}") from exc
+            print(f"[gemma_core] Cloud failed ({exc}), falling back to local.")
 
     if status["mode"] == "online" and not _cloud_is_configured():
         print("[gemma_core] Online but cloud not configured — using local llama-server.")
@@ -538,6 +421,4 @@ def get_model_info() -> dict:
         "has_vision": os.path.exists(MMPROJ_PATH),
         "loaded": _get_llama_health(),
         "max_tokens": MAX_TOKENS,
-        "cloud_cooldown_remaining_sec": int(round(_get_cloud_cooldown_remaining_sec())),
-        "cloud_last_error": _cloud_failure_state.get("last_error", ""),
     }

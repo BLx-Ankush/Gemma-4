@@ -45,20 +45,7 @@ def _check_connectivity() -> bool:
             timeout=PING_TIMEOUT_SEC,
             allow_redirects=True,
         )
-        if response.status_code in (200, 204, 301, 302):
-            return True
-        if response.status_code not in (403, 405, 501):
-            return False
-
-        try:
-            response = requests.get(
-                PING_URL,
-                timeout=PING_TIMEOUT_SEC,
-                allow_redirects=True,
-            )
-            return response.status_code in (200, 204, 301, 302)
-        except Exception:
-            return False
+        return response.status_code in (200, 204, 301, 302)
     except Exception:
         return False
 

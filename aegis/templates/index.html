@@ -8,7 +8,7 @@
   <meta name="description" content="Offline-first medical first-response AI. Works without internet." />
   <title>AEGIS — Medical First-Response AI</title>
   <link rel="manifest" href="/manifest.json" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260411f" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ cache_bust }}" />
 </head>
 <body>
 
@@ -34,240 +34,86 @@
           <div class="status-pill secondary" id="model-pill">
             <span id="model-text">Model: loading</span>
           </div>
+          <div class="status-pill secondary cooldown-pill" id="cooldown-pill" hidden>
+            <span id="cooldown-text">Cloud cooldown: 0s</span>
+          </div>
         </div>
       </div>
     </header>
 
-    <!-- ── Tab bar ───────────────────────────────────────────────────── -->
-    <nav class="tab-bar">
-      <button class="tab active" data-tab="veda">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        VEDA
-      </button>
-      <button class="tab" data-tab="voice">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-        VOICE
-      </button>
-      <button class="tab" data-tab="mirror">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        MIRROR
-      </button>
-    </nav>
-
     <!-- ════════════════════════════════════════════════════════════════
-         VEDA — Text + Image Medical Query
+         Unified Assistant Panel
     ════════════════════════════════════════════════════════════════ -->
-    <section class="panel tab-panel active" id="panel-veda">
+    <section class="panel" id="panel-assistant">
 
       <div class="panel-header">
-        <h2>Medical Query</h2>
-        <p class="panel-sub">Describe what happened. Attach a photo for visual triage.</p>
+        <h2>Speak to AEGIS</h2>
+        <p class="panel-sub">Attach a photo if needed, then tap the speak button in the center.</p>
       </div>
 
       <!-- Image capture -->
       <div class="capture-strip" id="capture-strip">
-        <label class="capture-btn" id="capture-label" for="veda-image">
+        <label class="capture-btn" id="capture-label" for="assistant-image">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3H8l-2 4h12l-2-4z"/><circle cx="12" cy="14" r="3"/></svg>
           Attach Photo
-          <input id="veda-image" type="file" accept="image/*" capture="environment" hidden />
+          <input id="assistant-image" type="file" accept="image/*" capture="environment" hidden />
         </label>
-        <div class="img-preview-wrap" id="img-preview-wrap" hidden>
-          <img id="img-preview" alt="Attached image" />
-          <button type="button" class="img-remove" id="img-remove" aria-label="Remove image">&times;</button>
+        <div class="img-preview-wrap" id="assistant-image-preview-wrap" hidden>
+          <img id="assistant-image-preview" alt="Attached image" />
+          <button type="button" class="img-remove" id="assistant-image-remove" aria-label="Remove image">&times;</button>
         </div>
       </div>
 
-      <form id="veda-form" class="veda-form" novalidate>
-        <label class="field-label">
-          <span>Language</span>
-          <select id="veda-language" name="language">
-            <option value="English">English</option>
-            <option value="Hindi">हिन्दी — Hindi</option>
-            <option value="Kannada">ಕನ್ನಡ — Kannada</option>
-            <option value="Tamil">தமிழ் — Tamil</option>
-            <option value="Telugu">తెలుగు — Telugu</option>
-            <option value="Bengali">বাংলা — Bengali</option>
-            <option value="Marathi">मराठी — Marathi</option>
-            <option value="Gujarati">ગુજરાતી — Gujarati</option>
-            <option value="Malayalam">മലയാളം — Malayalam</option>
-            <option value="Urdu">اردو — Urdu</option>
-            <option value="Spanish">Español — Spanish</option>
-            <option value="French">Français — French</option>
-            <option value="Swahili">Kiswahili — Swahili</option>
-            <option value="Arabic">العربية — Arabic</option>
-          </select>
-        </label>
-
-        <label class="field-label">
-          <span>What happened?</span>
-          <textarea id="veda-text" name="text" rows="4"
-            placeholder="E.g. I burned my hand while cooking. What should I do?"></textarea>
-        </label>
-
-        <button type="submit" class="btn-primary" id="veda-submit">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-          Get Medical Guidance
-        </button>
-      </form>
-
-      <!-- Response area -->
-      <div class="response-area" id="veda-response-area" hidden>
-        <div class="response-header-row">
-          <span class="response-badge">AEGIS Response</span>
-          <span class="lang-chip" id="veda-lang-chip"></span>
-          <span class="mode-chip" id="veda-mode-chip"></span>
-        </div>
-        <div class="response-text" id="veda-response-text"></div>
-        <audio id="veda-audio" class="audio-bar" controls hidden></audio>
-        <div class="mirror-panel" id="veda-mirror-panel" hidden>
-          <div class="mirror-panel-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            MIRROR Safety Audit
-          </div>
-          <div class="mirror-body">
-            <div class="mirror-score-wrap">
-              <svg class="score-ring" viewBox="0 0 44 44">
-                <circle cx="22" cy="22" r="18" fill="none" stroke="#e2e8e9" stroke-width="4"/>
-                <circle id="veda-score-arc" cx="22" cy="22" r="18" fill="none"
-                  stroke="#0db89e" stroke-width="4"
-                  stroke-dasharray="113" stroke-dashoffset="113"
-                  stroke-linecap="round"
-                  transform="rotate(-90 22 22)"/>
-              </svg>
-              <span class="score-number" id="veda-score-num">—</span>
-            </div>
-            <div class="mirror-details">
-              <div class="mirror-verdict" id="veda-verdict"></div>
-              <div class="mirror-flags" id="veda-flags"></div>
-              <div class="mirror-reasoning" id="veda-reasoning"></div>
-            </div>
-          </div>
-        </div>
-        <div class="meta-bar" id="veda-meta"></div>
-      </div>
-    </section>
-
-    <!-- ════════════════════════════════════════════════════════════════
-         VOICE — Record + Respond
-    ════════════════════════════════════════════════════════════════ -->
-    <section class="panel tab-panel" id="panel-voice" hidden>
-
-      <div class="panel-header">
-        <h2>Voice Session</h2>
-        <p class="panel-sub">Speak your query. AEGIS responds in your language — out loud.</p>
-      </div>
-
-      <!-- Session controls -->
-      <div class="session-bar">
-        <button class="btn-primary btn-sm" id="btn-start-session">Start Session</button>
-        <button class="btn-ghost btn-sm" id="btn-end-session" disabled>End Session</button>
-        <span class="session-chip" id="session-chip">No active session</span>
-      </div>
-
-      <!-- Big record button -->
       <div class="record-center">
-        <button class="record-btn" id="record-btn" disabled aria-label="Start recording">
+        <button class="record-btn" id="record-btn" aria-label="Start recording">
           <div class="record-ring" id="record-ring"></div>
           <svg class="record-icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
           <svg class="record-icon-stop" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         </button>
-        <p class="record-hint" id="record-hint">Start a session first</p>
+        <p class="record-hint" id="record-hint">Tap to speak</p>
         <canvas id="waveform-canvas" class="waveform" width="300" height="48" hidden></canvas>
       </div>
 
-      <label class="field-label voice-lang">
-        <span>Voice language</span>
-        <select id="voice-language">
-          <option value="English">English</option>
-          <option value="Hindi">Hindi</option>
-          <option value="Kannada">Kannada</option>
-          <option value="Tamil">Tamil</option>
-          <option value="Telugu">Telugu</option>
-          <option value="Spanish">Spanish</option>
-          <option value="French">French</option>
-          <option value="Swahili">Swahili</option>
-          <option value="Arabic">Arabic</option>
-        </select>
-      </label>
-
-      <!-- Voice response -->
-      <div class="response-area" id="voice-response-area" hidden>
-        <div class="transcript-bubble" id="voice-transcript-bubble" hidden>
+      <!-- Response area with written + audio output -->
+      <div class="response-area" id="assistant-response-area" hidden>
+        <div class="transcript-bubble" id="assistant-transcript-wrap" hidden>
           <span class="transcript-label">You said</span>
-          <span id="voice-transcript-text"></span>
+          <span id="assistant-transcript"></span>
         </div>
         <div class="response-header-row">
           <span class="response-badge">AEGIS Response</span>
-          <span class="lang-chip" id="voice-lang-chip"></span>
-          <span class="mode-chip" id="voice-mode-chip"></span>
+          <span class="lang-chip" id="assistant-lang-chip"></span>
+          <span class="mode-chip" id="assistant-mode-chip"></span>
         </div>
-        <div class="response-text" id="voice-response-text"></div>
-        <audio id="voice-audio" class="audio-bar" controls hidden></audio>
-        <div class="mirror-panel" id="voice-mirror-panel" hidden>
-          <div class="mirror-panel-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            MIRROR Safety Audit
-          </div>
-          <div class="mirror-body">
-            <div class="mirror-score-wrap">
-              <svg class="score-ring" viewBox="0 0 44 44">
-                <circle cx="22" cy="22" r="18" fill="none" stroke="#e2e8e9" stroke-width="4"/>
-                <circle id="voice-score-arc" cx="22" cy="22" r="18" fill="none"
-                  stroke="#0db89e" stroke-width="4"
-                  stroke-dasharray="113" stroke-dashoffset="113"
-                  stroke-linecap="round"
-                  transform="rotate(-90 22 22)"/>
-              </svg>
-              <span class="score-number" id="voice-score-num">—</span>
-            </div>
-            <div class="mirror-details">
-              <div class="mirror-verdict" id="voice-verdict"></div>
-              <div class="mirror-flags" id="voice-flags"></div>
-              <div class="mirror-reasoning" id="voice-reasoning"></div>
-            </div>
-          </div>
-        </div>
-        <div class="meta-bar" id="voice-meta"></div>
-      </div>
-
-      <!-- Turn history -->
-      <div class="history-section" id="history-section" hidden>
-        <h3 class="history-title">Session History</h3>
-        <div class="history-list" id="history-list"></div>
+        <button type="button" class="history-inline-btn" id="history-toggle" aria-label="Open query history">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 8v5l3 2"/>
+            <path d="M3.05 11a9 9 0 1 1 .5 4"/>
+            <path d="M3 4v4h4"/>
+          </svg>
+          <span>History</span>
+          <span class="history-count" id="history-count">0</span>
+        </button>
+        <div class="response-text" id="assistant-response-text"></div>
+        <audio id="assistant-response-audio" class="audio-bar" controls hidden></audio>
+        <div class="meta-bar" id="assistant-response-meta"></div>
       </div>
     </section>
-
-    <!-- ════════════════════════════════════════════════════════════════
-         MIRROR — Audit Log
-    ════════════════════════════════════════════════════════════════ -->
-    <section class="panel tab-panel" id="panel-mirror" hidden>
-
-      <div class="panel-header">
-        <h2>MIRROR Audit Log</h2>
-        <p class="panel-sub">Every AEGIS response is independently audited before reaching the user. Every time.</p>
-      </div>
-
-      <div class="mirror-summary" id="mirror-summary"></div>
-
-      <div class="mirror-log-list" id="mirror-log-list">
-        <p class="empty-note">No audit entries yet. Make a query on the VEDA or VOICE tab.</p>
-      </div>
-
-      <button class="btn-ghost btn-sm" id="btn-refresh-log">↻ Refresh Log</button>
-    </section>
-
   </main>
 
-  <!-- ── Spinner overlay ── -->
-  <div class="spinner-overlay" id="spinner" hidden>
-    <div class="spinner-box">
-      <div class="spinner-ring"></div>
-      <p id="spinner-msg">Processing&hellip;</p>
-      <p id="spinner-elapsed" class="spinner-elapsed" hidden>Elapsed: 0s</p>
-      <button type="button" class="btn-ghost btn-sm spinner-cancel" id="spinner-cancel">Cancel</button>
+  <aside class="history-drawer" id="history-drawer" hidden>
+    <div class="history-drawer-panel">
+      <div class="history-drawer-header">
+        <h3>History</h3>
+        <div class="history-actions">
+          <button type="button" class="btn-ghost btn-sm" id="history-clear">Clear</button>
+          <button type="button" class="btn-ghost btn-sm" id="history-close">Close</button>
+        </div>
+      </div>
+      <div class="history-list" id="history-list"></div>
     </div>
-  </div>
+  </aside>
 
-  <script src="{{ url_for('static', filename='app.js') }}?v=20260411f"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v={{ cache_bust }}"></script>
 </body>
 </html>
