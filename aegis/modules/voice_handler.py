@@ -27,6 +27,35 @@ class VoiceSession:
 _SESSIONS: Dict[str, VoiceSession] = {}
 
 
+def _normalize_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _build_mirror_view_payload(result: veda.VedaResult) -> dict:
+    draft = _normalize_text(result.raw_response)
+    final = _normalize_text(result.response_text)
+    rectified = draft != final
+
+    verdict = (result.mirror_report.verdict or "warn").strip().lower()
+    if verdict == "block":
+        action = "MIRROR blocked unsafe output and returned a safe fallback response."
+    elif rectified:
+        action = "MIRROR rectified the draft response before final delivery."
+    else:
+        action = "Draft response passed MIRROR checks; no rectification was needed."
+
+    return {
+        "draft_response": draft,
+        "final_response": final,
+        "rectified": rectified,
+        "rectification_action": action,
+        "verdict": verdict,
+        "confidence_score": int(max(0, min(100, result.mirror_report.confidence_score))),
+        "flags": list(result.mirror_report.flags),
+        "reasoning_trace": _normalize_text(result.mirror_report.reasoning_trace),
+    }
+
+
 def create_session() -> str:
     session_id = str(uuid.uuid4())
     now = time.time()
@@ -120,8 +149,12 @@ def process_voice_turn(
             "flags": result.mirror_report.flags,
             "verdict": result.mirror_report.verdict,
             "notes": result.mirror_report.reasoning_trace,
+            "audit_time_ms": result.mirror_report.audit_time_ms,
         },
+        "mirror_view": _build_mirror_view_payload(result),
         "drug_context": result.drug_context,
+        "drug_lookup": result.drug_metadata,
+        "model_latency_ms": result.model_latency_ms,
         "processing_time_ms": result.processing_time_ms,
         "turn_count": len(session.turns),
     }

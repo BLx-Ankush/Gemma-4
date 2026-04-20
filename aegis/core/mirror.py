@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 from . import gemma_core
 from .prompts import apply_mirror_verdict, build_mirror_prompt
+import os
 import re
 import time
 
@@ -17,6 +18,51 @@ class MirrorReport:
 
 MAX_AUDIT_LOG_ENTRIES = 200
 _AUDIT_LOG: List[Dict[str, object]] = []
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+DEFAULT_MIRROR_MAX_TOKENS = max(96, min(_safe_int_env("AEGIS_MIRROR_MAX_TOKENS", 192), 384))
+
+_VERDICT_ORDER = {"pass": 0, "warn": 1, "block": 2}
+_HIGH_RISK_GUARDRAILS = [
+    (
+        "possible_cardiac_emergency",
+        r"\b(chest pain|chest pressure|chest tightness|heart attack|pain radiating to .*left arm|left arm pain with chest)\b",
+        "block",
+        "query",
+    ),
+    (
+        "possible_overdose",
+        r"\b(overdose|too much insulin|insulin overdose|too many (sleeping )?pills|too many tablets|exact antidote|antidote dose|poison(ing|ed)?)\b",
+        "block",
+        "query",
+    ),
+    (
+        "self_harm_crisis",
+        r"\b(do not want to go on|don't want to go on|end my life|kill myself|self-harm|suicide)\b",
+        "block",
+        "query",
+    ),
+    (
+        "pediatric_medication_risk",
+        r"\b(\d{1,2}\s*-?\s*month(-old)?|infant|newborn|baby)\b.{0,120}\b(medicine|medication|dose|dosing|adult cough|syrup)\b",
+        "warn",
+        "query",
+    ),
+    (
+        "antibiotic_self_prescription",
+        r"\b(which antibiotic|best antibiotic|exact dose.*antibiotic|prescribe.*antibiotic|buy .*antibiotic)\b",
+        "warn",
+        "query",
+    ),
+]
 
 
 def _normalize_verdict(value: str) -> str:
@@ -126,43 +172,87 @@ def parse_mirror_response(raw_response: str) -> MirrorReport:
 
     except Exception:
         return MirrorReport(
-            confidence_score=50,
-            flags=["audit_parse_failed"],
-            reasoning_trace="Failed to parse audit response",
-            verdict="warn",
+            confidence_score=20,
+            flags=["audit_parse_failed", "manual_escalation_required"],
+            reasoning_trace="Failed to parse audit response safely. Manual escalation is required.",
+            verdict="block",
         )
 
 
-def audit(query: str, response: str, image_context: str = "") -> MirrorReport:
+def _upgrade_verdict(current: str, requested: str) -> str:
+    current_norm = _normalize_verdict(current)
+    requested_norm = _normalize_verdict(requested)
+    if _VERDICT_ORDER[requested_norm] > _VERDICT_ORDER[current_norm]:
+        return requested_norm
+    return current_norm
+
+
+def _apply_high_risk_guardrails(query: str, response: str, report: MirrorReport) -> MirrorReport:
+    inspected_query = (query or "").lower()
+    inspected_response = (response or "").lower()
+    triggered_flags: List[str] = []
+    requested_verdict = report.verdict
+
+    for flag, pattern, forced_verdict, source in _HIGH_RISK_GUARDRAILS:
+        inspected_text = inspected_query if source == "query" else f"{inspected_query}\n{inspected_response}"
+        if re.search(pattern, inspected_text, flags=re.IGNORECASE):
+            triggered_flags.append(flag)
+            requested_verdict = _upgrade_verdict(requested_verdict, forced_verdict)
+
+    if not triggered_flags:
+        return report
+
+    for flag in triggered_flags:
+        if flag not in report.flags:
+            report.flags.append(flag)
+
+    report.verdict = _upgrade_verdict(report.verdict, requested_verdict)
+    report.confidence_score = min(report.confidence_score, 80)
+
+    note = "Rule-based guardrail flagged high-risk pattern(s): " + ", ".join(triggered_flags)
+    if report.reasoning_trace:
+        report.reasoning_trace = f"{report.reasoning_trace} | {note}"
+    else:
+        report.reasoning_trace = note
+
+    return report
+
+
+def audit(
+    query: str,
+    response: str,
+    image_context: str = "",
+    max_tokens: int = 0,
+) -> MirrorReport:
     start_time = time.time()
+    token_budget = max(96, min(int(max_tokens) if max_tokens else DEFAULT_MIRROR_MAX_TOKENS, 384))
 
     prompt = build_mirror_prompt(query=query, image_context=image_context, response=response)
     raw_result = ""
 
     try:
-        # FIX 6: max_tokens raised from 12 to 96.
-        # 12 tokens cannot fit CONFIDENCE+FLAGS+REASONING+VERDICT.
         # MIRROR always runs — no deferral, no skipping.
-        # force_cloud=True when online so MIRROR takes 2-3s not 54s.
+        # Do not force cloud here; let gemma_core route naturally so offline mode
+        # never blocks on cloud attempts.
         infer_result = gemma_core.infer(
             system_prompt=prompt,
             user_message="Provide your safety audit of the response above.",
             image_path=None,
-            max_tokens=96,
-            force_cloud=True,
+            max_tokens=token_budget,
+            force_cloud=False,
         )
         raw_result = infer_result.response if hasattr(infer_result, "response") else str(infer_result)
         report = parse_mirror_response(raw_result)
+        report = _apply_high_risk_guardrails(query, response, report)
 
     except Exception as exc:
         raw_result = str(exc)
-        # FIX 7: On audit error, return warn (not a crash).
-        # confidence_score=60 means "uncertain but not failed" — shows amber not red.
+        # Fail closed on audit unavailability for medical safety.
         report = MirrorReport(
-            confidence_score=60,
-            flags=["audit_unavailable"],
-            reasoning_trace=f"MIRROR audit could not complete: {exc}. Response passed with caveat.",
-            verdict="warn",
+            confidence_score=20,
+            flags=["audit_unavailable", "manual_escalation_required"],
+            reasoning_trace=f"MIRROR audit could not complete safely: {exc}. Blocking response pending manual escalation.",
+            verdict="block",
         )
 
     report.audit_time_ms = int((time.time() - start_time) * 1000)

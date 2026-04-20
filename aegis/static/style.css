@@ -21,6 +21,10 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+[hidden] {
+  display: none !important;
+}
+
 html, body {
   height: 100%;
   -webkit-tap-highlight-color: transparent;
@@ -156,6 +160,35 @@ h1 {
   white-space: nowrap;
 }
 .status-pill.secondary { font-size: .74rem; color: var(--muted); }
+
+.install-pill {
+  background: linear-gradient(145deg, #0a4d55, #0d5a62);
+  color: #fff;
+  border-color: rgba(8, 49, 58, .45);
+  cursor: pointer;
+  font-weight: 700;
+  transition: filter .18s, transform .12s;
+}
+
+.install-pill:hover {
+  filter: brightness(1.08);
+}
+
+.install-pill:active {
+  transform: scale(.98);
+}
+
+#network-pill[data-state="offline"] {
+  border-color: rgba(198,67,45,.35);
+  background: rgba(198,67,45,.09);
+  color: #8f1a0a;
+}
+
+#benchmark-pill {
+  border-color: rgba(13,184,158,.3);
+  background: rgba(13,184,158,.1);
+  color: #0a6f61;
+}
 
 .cooldown-pill {
   border-color: rgba(245,157,52,.35);
@@ -354,6 +387,10 @@ textarea { resize: vertical; min-height: 90px; }
   font-size: .74rem; color: var(--muted);
 }
 
+.meta-bar strong {
+  color: #0a4d55;
+}
+
 /* ── MIRROR panel ── */
 .mirror-panel {
   border: 1px solid var(--line);
@@ -408,6 +445,28 @@ textarea { resize: vertical; min-height: 90px; }
 }
 .flag-ok { font-size: .72rem; color: var(--pass); font-weight: 600; }
 .mirror-reasoning { font-size: .77rem; color: var(--muted); font-style: italic; }
+
+.mirror-view-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: .75rem;
+  background: rgba(255,255,255,.74);
+}
+
+.mirror-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
+  margin-bottom: .6rem;
+}
+
+.mirror-view-header h3 {
+  font-size: .9rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: #0a4d55;
+}
 
 /* ── Session bar (VOICE) ── */
 .session-bar {
@@ -664,6 +723,25 @@ textarea { resize: vertical; min-height: 90px; }
 }
 .log-flags  { display: flex; flex-wrap: wrap; gap: .25rem; margin: .3rem 0; }
 .log-reason { font-size: .73rem; color: var(--muted); font-style: italic; }
+
+.log-body-line {
+  font-size: .79rem;
+  color: var(--ink);
+  line-height: 1.45;
+  margin-bottom: .24rem;
+  white-space: pre-wrap;
+}
+
+.log-body-line strong {
+  color: #0a4d55;
+}
+
+.log-action {
+  font-size: .74rem;
+  color: #0a6f61;
+  font-weight: 600;
+  margin: .22rem 0;
+}
 
 /* ── Spinner overlay ── */
 .spinner-overlay {

@@ -37,6 +37,18 @@
           <div class="status-pill secondary cooldown-pill" id="cooldown-pill" hidden>
             <span id="cooldown-text">Cloud cooldown: 0s</span>
           </div>
+          <div class="status-pill secondary" id="network-pill">
+            <span id="network-text">Browser: online</span>
+          </div>
+          <div class="status-pill secondary" id="cache-pill">
+            <span id="cache-text">Drug cache: loading</span>
+          </div>
+          <div class="status-pill secondary" id="benchmark-pill" hidden>
+            <span id="benchmark-text">Benchmark: pending</span>
+          </div>
+          <button type="button" class="status-pill install-pill" id="install-btn" hidden>
+            Install App
+          </button>
         </div>
       </div>
     </header>
@@ -95,6 +107,37 @@
           <span class="history-count" id="history-count">0</span>
         </button>
         <div class="response-text" id="assistant-response-text"></div>
+        <div class="mirror-panel" id="assistant-mirror-panel" hidden>
+          <div class="mirror-panel-header">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 3l8 4v6c0 5-3.4 8.8-8 10-4.6-1.2-8-5-8-10V7l8-4z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+            <span>MIRROR Safety Audit</span>
+          </div>
+          <div class="mirror-body">
+            <div class="mirror-score-wrap">
+              <svg class="score-ring" viewBox="0 0 42 42" aria-hidden="true">
+                <circle cx="21" cy="21" r="15.915" fill="none" stroke="rgba(13,70,78,.16)" stroke-width="3"></circle>
+                <circle id="assistant-mirror-score-ring" cx="21" cy="21" r="15.915" fill="none" stroke="var(--pass)" stroke-width="3" stroke-linecap="round" stroke-dasharray="0 100" transform="rotate(-90 21 21)"></circle>
+              </svg>
+              <div class="score-number" id="assistant-mirror-score">0</div>
+            </div>
+            <div class="mirror-details">
+              <span class="mirror-verdict" id="assistant-mirror-verdict" data-verdict="warn">warn</span>
+              <div class="mirror-flags" id="assistant-mirror-flags"></div>
+              <p class="mirror-reasoning" id="assistant-mirror-reasoning"></p>
+            </div>
+          </div>
+        </div>
+        <section class="mirror-view-panel" id="assistant-mirror-view-panel" hidden>
+          <div class="mirror-view-header">
+            <h3>Mirror View</h3>
+            <button type="button" class="btn-ghost btn-sm" id="mirror-view-clear">Clear Logs</button>
+          </div>
+          <div class="summary-grid" id="assistant-mirror-view-summary"></div>
+          <div class="mirror-log-list" id="assistant-mirror-view-list"></div>
+        </section>
         <audio id="assistant-response-audio" class="audio-bar" controls hidden></audio>
         <div class="meta-bar" id="assistant-response-meta"></div>
       </div>

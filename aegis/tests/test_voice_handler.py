@@ -24,7 +24,9 @@ def test_process_voice_turn_updates_history(monkeypatch):
         raw_response="Keep the child hydrated and monitor temperature.",
         mirror_report=report,
         drug_context="",
+        drug_metadata={"has_context": False, "match_count": 0, "sources": []},
         audio_response_path="tmp/reply.wav",
+        model_latency_ms=78,
         processing_time_ms=123,
         image_path="",
     )
@@ -36,6 +38,9 @@ def test_process_voice_turn_updates_history(monkeypatch):
     assert payload["transcript"] == "my child has fever"
     assert payload["mirror"]["risk_tags"] == ["potential_harm"]
     assert payload["mirror"]["notes"] == "watchful"
+    assert payload["mirror_view"]["verdict"] == "warn"
+    assert payload["mirror_view"]["rectified"] is False
+    assert "rectification_action" in payload["mirror_view"]
     assert payload["turn_count"] == 1
 
     history = voice_handler.get_session_history(payload["session_id"])

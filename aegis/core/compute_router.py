@@ -6,6 +6,7 @@ the network on every request in mobile/Termux environments.
 """
 
 import os
+import threading
 import time
 
 import requests
@@ -20,6 +21,8 @@ _last_refresh_at: float = 0.0
 _device_ram_gb: float = 0.0
 _is_online: bool = False
 _mode: str = "offline"
+_refresh_in_flight: bool = False
+_state_lock = threading.Lock()
 
 
 def _measure_ram() -> float:
@@ -65,10 +68,39 @@ def _check_connectivity() -> bool:
 
 def _do_refresh() -> None:
     global _device_ram_gb, _is_online, _mode, _last_refresh_at
-    _device_ram_gb = _measure_ram()
-    _is_online = _check_connectivity()
-    _mode = "online" if _is_online else "offline"
-    _last_refresh_at = time.time()
+    measured_ram = _measure_ram()
+    online_state = _check_connectivity()
+
+    with _state_lock:
+        _device_ram_gb = measured_ram
+        _is_online = online_state
+        _mode = "online" if online_state else "offline"
+        _last_refresh_at = time.time()
+
+
+def _refresh_worker() -> None:
+    global _refresh_in_flight
+    try:
+        _do_refresh()
+    finally:
+        with _state_lock:
+            _refresh_in_flight = False
+
+
+def _schedule_refresh_async(force: bool = False) -> bool:
+    global _refresh_in_flight
+    with _state_lock:
+        now = time.time()
+        is_stale = now - _last_refresh_at >= REFRESH_INTERVAL_SEC
+        if _refresh_in_flight:
+            return False
+        if not force and not is_stale:
+            return False
+        _refresh_in_flight = True
+
+    worker = threading.Thread(target=_refresh_worker, daemon=True)
+    worker.start()
+    return True
 
 
 def check_connectivity() -> bool:
@@ -79,7 +111,9 @@ def check_ram() -> float:
     return _measure_ram()
 
 
-_do_refresh()
+_device_ram_gb = _measure_ram()
+_last_refresh_at = time.time()
+_schedule_refresh_async(force=True)
 
 
 DEVICE_RAM_GB: float = _device_ram_gb
@@ -90,38 +124,44 @@ MODE: str = _mode
 def refresh() -> dict:
     global DEVICE_RAM_GB, IS_ONLINE, MODE
 
-    now = time.time()
-    if now - _last_refresh_at >= REFRESH_INTERVAL_SEC:
-        _do_refresh()
+    _schedule_refresh_async(force=False)
+    with _state_lock:
         DEVICE_RAM_GB = _device_ram_gb
         IS_ONLINE = _is_online
         MODE = _mode
 
-    return {
-        "mode": _mode,
-        "ram_gb": _device_ram_gb,
-        "is_online": _is_online,
-        "last_checked": _last_refresh_at,
-        "refresh_interval_sec": REFRESH_INTERVAL_SEC,
-    }
+        return {
+            "mode": _mode,
+            "ram_gb": _device_ram_gb,
+            "is_online": _is_online,
+            "last_checked": _last_refresh_at,
+            "refresh_interval_sec": REFRESH_INTERVAL_SEC,
+        }
 
 
 def get_status() -> dict:
-    return {
-        "mode": _mode,
-        "ram_gb": _device_ram_gb,
-        "is_online": _is_online,
-        "last_checked": _last_refresh_at,
-    }
+    with _state_lock:
+        return {
+            "mode": _mode,
+            "ram_gb": _device_ram_gb,
+            "is_online": _is_online,
+            "last_checked": _last_refresh_at,
+        }
 
 
 def force_refresh() -> dict:
     _do_refresh()
     global DEVICE_RAM_GB, IS_ONLINE, MODE
-    DEVICE_RAM_GB = _device_ram_gb
-    IS_ONLINE = _is_online
-    MODE = _mode
-    return get_status()
+    with _state_lock:
+        DEVICE_RAM_GB = _device_ram_gb
+        IS_ONLINE = _is_online
+        MODE = _mode
+        return {
+            "mode": _mode,
+            "ram_gb": _device_ram_gb,
+            "is_online": _is_online,
+            "last_checked": _last_refresh_at,
+        }
 
 
 if __name__ == "__main__":

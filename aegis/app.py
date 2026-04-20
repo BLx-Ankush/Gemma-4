@@ -5,6 +5,7 @@ Runs on 0.0.0.0 so devices connected to the phone hotspot can reach it.
 """
 
 import base64
+import json
 import os
 import uuid
 import time
@@ -39,7 +40,7 @@ def _load_env_file(env_path: Path) -> None:
 _load_env_file(BASE_DIR / ".env")
 
 from aegis.core import compute_router, gemma_core, mirror
-from aegis.modules import veda, voice_handler
+from aegis.modules import drug_lookup, veda, voice_handler
 
 
 DATA_DIR = BASE_DIR / "data"
@@ -50,6 +51,31 @@ REQUEST_TIMEOUT_SEC = max(10, int(os.environ.get("AEGIS_REQUEST_TIMEOUT_SEC", "3
 _REQUEST_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 APP_STARTED_AT = int(time.time())
 APP_BUILD_ID = os.environ.get("AEGIS_BUILD_ID", "2026-04-11-r2")
+BENCHMARK_REPORT_PATH = BASE_DIR / "benchmark" / "report.json"
+
+
+def _load_benchmark_summary() -> dict:
+    if not BENCHMARK_REPORT_PATH.exists():
+        return {"available": False}
+
+    try:
+        payload = json.loads(BENCHMARK_REPORT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "error": "invalid_report"}
+
+    report = payload.get("report", payload) if isinstance(payload, dict) else {}
+    latency = report.get("latency", {}) if isinstance(report, dict) else {}
+    safety = report.get("safety", {}) if isinstance(report, dict) else {}
+
+    return {
+        "available": True,
+        "generated_at": payload.get("generated_at", "") if isinstance(payload, dict) else "",
+        "mode": payload.get("mode", "") if isinstance(payload, dict) else "",
+        "scenarios": int(report.get("total", 0)) if isinstance(report, dict) else 0,
+        "p95_ms": int(latency.get("p95_ms", 0)) if isinstance(latency, dict) else 0,
+        "safety_caught": int(safety.get("caught_warn_or_block", 0)) if isinstance(safety, dict) else 0,
+        "dangerous_scenarios": int(safety.get("dangerous_scenarios", 0)) if isinstance(safety, dict) else 0,
+    }
 
 
 def _safe_timeout_from_env(name: str, fallback_sec: int) -> int:
@@ -108,6 +134,35 @@ def _save_image_b64(image_b64: str, directory: Path) -> str:
     return str(output_path)
 
 
+def _normalize_text(value) -> str:
+    return str(value or "").strip()
+
+
+def _build_mirror_view_payload(raw_response: str, final_response: str, report: mirror.MirrorReport) -> dict:
+    draft = _normalize_text(raw_response)
+    final = _normalize_text(final_response)
+    rectified = draft != final
+
+    verdict = (report.verdict or "warn").strip().lower()
+    if verdict == "block":
+        action = "MIRROR blocked unsafe output and returned a safe fallback response."
+    elif rectified:
+        action = "MIRROR rectified the draft response before final delivery."
+    else:
+        action = "Draft response passed MIRROR checks; no rectification was needed."
+
+    return {
+        "draft_response": draft,
+        "final_response": final,
+        "rectified": rectified,
+        "rectification_action": action,
+        "verdict": verdict,
+        "confidence_score": int(max(0, min(100, report.confidence_score))),
+        "flags": list(report.flags),
+        "reasoning_trace": _normalize_text(report.reasoning_trace),
+    }
+
+
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -151,6 +206,8 @@ def create_app() -> Flask:
         # Only /status triggers a real refresh; inference routes use get_status()
         compute = compute_router.force_refresh()
         model_info = gemma_core.get_model_info()
+        cache_meta = drug_lookup.get_cache_metadata()
+        benchmark_summary = _load_benchmark_summary()
         veda_timeout_sec = _safe_timeout_from_env("AEGIS_VEDA_REQUEST_TIMEOUT_SEC", REQUEST_TIMEOUT_SEC)
         voice_timeout_sec = _safe_timeout_from_env("AEGIS_VOICE_REQUEST_TIMEOUT_SEC", REQUEST_TIMEOUT_SEC)
         return jsonify(
@@ -158,10 +215,13 @@ def create_app() -> Flask:
                 "ok": True,
                 "compute": compute,
                 "model": model_info,
+                "drug_cache": cache_meta,
+                "benchmark": benchmark_summary,
                 "runtime": {
                     "build_id": APP_BUILD_ID,
                     "pid": os.getpid(),
                     "started_at": APP_STARTED_AT,
+                    "uptime_sec": max(0, int(time.time()) - APP_STARTED_AT),
                     "timeouts": {
                         "default_request_sec": REQUEST_TIMEOUT_SEC,
                         "veda_request_sec": veda_timeout_sec,
@@ -170,6 +230,16 @@ def create_app() -> Flask:
                 },
             }
         )
+
+    @app.route("/api/benchmark/latest", methods=["GET"])
+    def benchmark_latest():
+        if not BENCHMARK_REPORT_PATH.exists():
+            return jsonify({"ok": False, "error": "Benchmark report not found."}), 404
+        try:
+            payload = json.loads(BENCHMARK_REPORT_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Failed to parse benchmark report: {exc}"}), 500
+        return jsonify({"ok": True, "data": payload})
 
     # ── VEDA: text + image medical query ─────────────────────────────────────
     @app.route("/api/query", methods=["POST"])
@@ -224,6 +294,7 @@ def create_app() -> Flask:
                     "detected_language": result.detected_language,
                     "drug_context": result.drug_context,
                     "processing_time_ms": result.processing_time_ms,
+                    "model_latency_ms": result.model_latency_ms,
                     "mirror": {
                         "confidence_score": result.mirror_report.confidence_score,
                         "flags": result.mirror_report.flags,
@@ -231,7 +302,13 @@ def create_app() -> Flask:
                         "reasoning_trace": result.mirror_report.reasoning_trace,
                         "audit_time_ms": result.mirror_report.audit_time_ms,
                     },
+                    "mirror_view": _build_mirror_view_payload(
+                        raw_response=result.raw_response,
+                        final_response=result.response_text,
+                        report=result.mirror_report,
+                    ),
                     "audio_response_data_url": _audio_to_data_url(result.audio_response_path),
+                    "drug_lookup": result.drug_metadata,
                     "mode": compute_router.refresh()["mode"],
                 },
             })

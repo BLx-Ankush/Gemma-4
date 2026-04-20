@@ -58,3 +58,23 @@ def test_get_drug_context_contains_core_fields(monkeypatch):
     assert "Paracetamol" in context
     assert "Metformin" in context
     assert "Standard adult dosage" in context
+
+
+def test_get_drug_context_metadata_includes_matches_and_sources(monkeypatch):
+    _set_test_cache(monkeypatch)
+
+    metadata = drug_lookup.get_drug_context_metadata("Can I take Tylenol now?")
+
+    assert metadata["has_context"] is True
+    assert metadata["match_count"] >= 1
+    assert "local_cache" in metadata["sources"] or metadata["sources"] == []
+
+
+def test_get_cache_metadata_returns_shape(monkeypatch):
+    _set_test_cache(monkeypatch)
+
+    metadata = drug_lookup.get_cache_metadata()
+
+    assert "cache_exists" in metadata
+    assert "cache_entries" in metadata
+    assert "live_lookup_enabled" in metadata

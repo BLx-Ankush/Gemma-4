@@ -30,8 +30,9 @@ def test_veda_returns_safe_fallback_on_pipeline_error(monkeypatch):
     result = veda.process_text_only("My child has trouble breathing", language="English")
 
     assert result.audio_response_path == "tmp/fallback.wav"
-    assert result.mirror_report.verdict == "warn"
+    assert result.mirror_report.verdict == "block"
     assert "system_unavailable" in result.mirror_report.flags
+    assert "manual_escalation_required" in result.mirror_report.flags
     assert len(result.response_text) > 0
 
 

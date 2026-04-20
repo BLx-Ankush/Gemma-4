@@ -1,6 +1,9 @@
 import json
 import os
 import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Dict, List
 import requests
 
@@ -10,7 +13,15 @@ from aegis.core import compute_router
 DRUG_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "drug_cache.json")
 
 _drug_cache = None
+_cache_loaded_at_ts: float = 0.0
 _live_cache: Dict[str, Dict] = {}
+_live_last_fetch_ts: float = 0.0
+
+
+def _iso_utc(timestamp: float) -> str:
+    if timestamp <= 0:
+        return ""
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _live_lookup_enabled() -> bool:
@@ -27,12 +38,24 @@ def _should_use_live_lookup() -> bool:
 
 
 def load_cache():
-    global _drug_cache
+    global _drug_cache, _cache_loaded_at_ts
     if _drug_cache is not None:
         return
 
-    with open(DRUG_CACHE_PATH, "r", encoding="utf-8") as file_handle:
-        _drug_cache = json.load(file_handle)
+    _cache_loaded_at_ts = time.time()
+    if not os.path.exists(DRUG_CACHE_PATH):
+        _drug_cache = {}
+        print("Drug cache file missing; continuing with empty cache")
+        return
+
+    try:
+        with open(DRUG_CACHE_PATH, "r", encoding="utf-8") as file_handle:
+            loaded = json.load(file_handle)
+        _drug_cache = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        _drug_cache = {}
+        print("Drug cache could not be parsed; continuing with empty cache")
+        return
 
     print(f"Drug cache loaded: {len(_drug_cache)} medicines")
 
@@ -107,6 +130,8 @@ def _normalize_openfda_result(result: Dict, query: str) -> Dict:
 
 
 def _search_drug_live(query: str) -> Optional[Dict]:
+    global _live_last_fetch_ts
+
     if query in _live_cache:
         return _live_cache[query]
 
@@ -131,6 +156,8 @@ def _search_drug_live(query: str) -> Optional[Dict]:
                 continue
 
             normalized = _normalize_openfda_result(results[0], query)
+            _live_last_fetch_ts = time.time()
+            normalized["fetched_at"] = _iso_utc(_live_last_fetch_ts)
             _live_cache[query] = normalized
             return normalized
         except Exception:
@@ -201,6 +228,60 @@ def get_drug_context(text: str) -> str:
         context_parts.append("---\n")
 
     return "".join(context_parts).strip()
+
+
+def get_drug_context_metadata(text: str) -> Dict[str, object]:
+    query_text = (text or "").strip()
+    found_names = extract_drug_names(query_text)
+    used_live_fallback = False
+
+    if not found_names and _should_use_live_lookup() and query_text:
+        found_names = [query_text]
+        used_live_fallback = True
+
+    matches: List[Dict[str, str]] = []
+    for name in found_names:
+        medicine = search_drug(name)
+        if not medicine:
+            continue
+        matches.append(
+            {
+                "query_term": name,
+                "generic_name": medicine.get("generic_name", "Unknown"),
+                "source": medicine.get("source", "local_cache"),
+            }
+        )
+
+    sources = sorted({entry.get("source", "local_cache") for entry in matches})
+
+    return {
+        "query": query_text,
+        "has_context": bool(matches),
+        "match_count": len(matches),
+        "matches": matches,
+        "sources": sources,
+        "live_lookup_enabled": _live_lookup_enabled(),
+        "live_fallback_used": used_live_fallback,
+    }
+
+
+def get_cache_metadata() -> Dict[str, object]:
+    load_cache()
+
+    cache_path = Path(DRUG_CACHE_PATH).resolve()
+    exists = cache_path.exists()
+    cache_mtime = cache_path.stat().st_mtime if exists else 0.0
+
+    return {
+        "cache_path": str(cache_path),
+        "cache_exists": exists,
+        "cache_entries": len(_drug_cache or {}),
+        "cache_last_modified": _iso_utc(cache_mtime),
+        "cache_loaded_at": _iso_utc(_cache_loaded_at_ts),
+        "live_lookup_enabled": _live_lookup_enabled(),
+        "live_cache_entries": len(_live_cache),
+        "live_last_fetch_at": _iso_utc(_live_last_fetch_ts),
+    }
 
 
 if __name__ == "__main__":

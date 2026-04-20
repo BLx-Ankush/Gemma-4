@@ -119,7 +119,9 @@ def test_route_aliases_status_veda_and_mirror_log(monkeypatch):
         raw_response="Use clean water and monitor symptoms.",
         mirror_report=fake_report,
         drug_context="",
+        drug_metadata={"has_context": False, "match_count": 0, "sources": []},
         audio_response_path="",
+        model_latency_ms=25,
         processing_time_ms=45,
         image_path="",
     )

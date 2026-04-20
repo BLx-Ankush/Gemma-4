@@ -46,15 +46,56 @@ If you need to regenerate drug cache:
 
 Then open: `http://127.0.0.1:5000`
 
+### Password-Protected Direct Launcher
+
+Run this file for a direct startup flow that asks for password `0007`, starts llama-server + AEGIS, and prints both local and LAN links:
+
+```powershell
+& "d:/Gemma 4/.venv/Scripts/python.exe" aegis/secure_launcher.py
+```
+
+Other people on your local network can open the printed LAN URL after startup.
+
+## Termux Production Dry-Run (Android)
+
+On-device verification for startup, warmup, and watchdog recovery:
+
+```bash
+chmod +x start.sh termux_dry_run.sh
+./start.sh
+./termux_dry_run.sh
+```
+
+Detailed checklist:
+
+- `TERMUX_DRY_RUN_CHECKLIST.md`
+
 ## Test
 
 ```powershell
 & "d:/Gemma 4/.venv/Scripts/python.exe" -m pytest aegis/tests -q
 ```
 
+## Benchmark (Submission Evidence)
+
+Generate benchmark artifacts used in the submission:
+
+```powershell
+& "d:/Gemma 4/.venv/Scripts/python.exe" aegis/benchmark/run_benchmark.py --base-url http://127.0.0.1:5000 --mode all --out aegis/benchmark/report.json --html-out aegis/benchmark/report.html
+```
+
+Artifacts:
+
+- `benchmark/report.json`
+- `benchmark/report.html`
+- `kaggle_submission_notebook.ipynb`
+- `GEMMA4_SHOWCASE_PLAYBOOK.md`
+- `DEMO_SCRIPT.md`
+
 ## API Endpoints
 
 - `GET /api/health`
+- `GET /api/benchmark/latest`
 - `POST /api/query` (`multipart/form-data`: `text`, optional `language`, optional `image`)
 - `POST /api/voice/session`
 - `DELETE /api/voice/session/<session_id>`

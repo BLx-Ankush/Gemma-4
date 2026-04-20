@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 from aegis.core import gemma_core, mirror
 from aegis.core.prompts import build_veda_prompt
 from . import drug_lookup, voice_utils
@@ -17,7 +17,9 @@ class VedaResult:
     raw_response: str
     mirror_report: mirror.MirrorReport
     drug_context: str
+    drug_metadata: Dict[str, object]
     audio_response_path: str
+    model_latency_ms: int
     processing_time_ms: int
     image_path: str
 
@@ -58,6 +60,7 @@ SCRIPT_REGEX = {
 INTERNAL_REASONING_HINTS = (
     "the user has",
     "the user hasn't",
+    "the user isn't",
     "the user has not",
     "the prompt",
     "system instructions",
@@ -68,14 +71,33 @@ INTERNAL_REASONING_HINTS = (
     "alternative interpretation",
     "hidden medical request",
     "system check",
+    "system test",
+    "test message",
+    "how to use me",
+    "best help from me",
+    "no analysis/planning",
+    "no labels",
+    "applying a medical structure",
+    "medical structure",
+    "no medical issue",
+    "no medical problem",
+    "non-existent injury",
+    "testing the bot",
+    "if the user is just testing",
+    "cause: n/a",
+    "warning: n/a",
+    "let's double-check",
+    "that's too robotic",
+    "nonsensical",
+    "revised plan",
     "refining based on",
     "persona",
     "alternative:",
     "response:",
-    "let's",
-    "i should",
-    "i will",
-    "i need to",
+    "let's think",
+    "i should return",
+    "i need to follow",
+    "i will provide user-facing",
     "wait,",
     "*wait*",
 )
@@ -85,6 +107,22 @@ SAFE_FALLBACK_MESSAGES = {
     "Hindi": "Main is samay surakshit roop se is prashn ko process nahi kar pa raha hoon. Kripya turant kisi health worker ya emergency seva se sampark karein.",
     "Kannada": "Iga ee vinantiyannu surakshitavagi prakriye maadalu sadyavilla. Dayavittu hatra iruva aroghya karmikarannu athava aapathkaaleena seveyannu takshan samparkisi.",
 }
+
+
+NON_MEDICAL_TEST_PATTERN = re.compile(
+    r"\b(hello|hi|hey|test|testing|check|checking|ping|mic|microphone|audio|voice|1\s*,?\s*2\s*,?\s*3|123)\b",
+    flags=re.IGNORECASE,
+)
+
+MEDICAL_SIGNAL_PATTERN = re.compile(
+    r"\b(pain|fever|burn|bleed|bleeding|injur|wound|cut|fracture|vomit|nausea|diarrhea|breath|breathing|cough|chest|allerg|rash|headache|dizz|unconscious|faint|seizure|swelling|poison|overdose|pregnan|child|baby|medicine|dose|tablet|sick|symptom)\b",
+    flags=re.IGNORECASE,
+)
+
+READY_MESSAGE_EN = (
+    "I hear you loud and clear. I am AEGIS, your first-aid assistant, and I am ready to provide immediate, practical guidance for any injuries or health concerns. "
+    "Please let me know what is happening or describe your symptoms so I can give you actionable steps to take."
+)
 
 
 def _safe_int_env(name: str, default: int) -> int:
@@ -99,14 +137,15 @@ def _is_env_enabled(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-VEDA_MAX_TOKENS = max(48, min(_safe_int_env("AEGIS_VEDA_MAX_TOKENS", 96), 256))
-SYNC_MIRROR_MAX_MODEL_MS = max(0, _safe_int_env("AEGIS_SYNC_MIRROR_MAX_MODEL_MS", 12000))
+VEDA_MAX_TOKENS = max(96, min(_safe_int_env("AEGIS_VEDA_MAX_TOKENS", 192), 384))
+MIRROR_AUDIT_MAX_TOKENS = max(96, min(_safe_int_env("AEGIS_MIRROR_MAX_TOKENS", 192), 384))
+MIRROR_AUDIT_MAX_TOKENS_OFFLINE = max(64, min(_safe_int_env("AEGIS_MIRROR_MAX_TOKENS_OFFLINE", 96), 256))
 
 ENABLE_TEXT_TTS = _is_env_enabled("AEGIS_ENABLE_TEXT_TTS", True)
 ENABLE_VOICE_TTS = _is_env_enabled("AEGIS_ENABLE_VOICE_TTS", True)
 TTS_MAX_CHARS = max(120, _safe_int_env("AEGIS_TTS_MAX_CHARS", 500))
 ENABLE_RESPONSE_LANGUAGE_REWRITE = _is_env_enabled("AEGIS_ENABLE_RESPONSE_LANGUAGE_REWRITE", True)
-ENABLE_VOICE_LANGUAGE_REWRITE = _is_env_enabled("AEGIS_ENABLE_VOICE_LANGUAGE_REWRITE", False)
+ENABLE_VOICE_LANGUAGE_REWRITE = _is_env_enabled("AEGIS_ENABLE_VOICE_LANGUAGE_REWRITE", True)
 LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS = max(
     0,
     _safe_int_env("AEGIS_LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS", 18000),
@@ -115,6 +154,20 @@ LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS = max(
 
 def _safe_fallback_message(language: str) -> str:
     return SAFE_FALLBACK_MESSAGES.get(language, SAFE_FALLBACK_MESSAGES["English"])
+
+
+def _looks_like_non_medical_test_query(query_text: str) -> bool:
+    text = (query_text or "").strip().lower()
+    if not text:
+        return False
+    if MEDICAL_SIGNAL_PATTERN.search(text):
+        return False
+
+    tokens = re.findall(r"[a-z0-9]+", text)
+    if len(tokens) > 24:
+        return False
+
+    return bool(NON_MEDICAL_TEST_PATTERN.search(text))
 
 
 def _normalize_language_name(language: str) -> str:
@@ -196,6 +249,19 @@ def _rewrite_response_in_language(response_text: str, language: str) -> str:
     return _sanitize_model_response(infer_result.response)
 
 
+def _build_ready_response(language: str) -> str:
+    target_language = _normalize_language_name(language)
+    if target_language == "English":
+        return READY_MESSAGE_EN
+
+    try:
+        rewritten = _rewrite_response_in_language(READY_MESSAGE_EN, target_language)
+        rewritten = _sanitize_model_response(rewritten)
+        return rewritten or READY_MESSAGE_EN
+    except Exception:
+        return READY_MESSAGE_EN
+
+
 def _enforce_response_language(response_text: str, language: str) -> str:
     if not response_text:
         return response_text
@@ -239,6 +305,12 @@ def _is_meta_line(line: str) -> bool:
         "goal:",
         "constraints:",
         "language:",
+        "acknowledge:",
+        "steps:",
+        "revised plan:",
+        "final answer:",
+        "draft answer:",
+        "mirror view:",
         "step 1:",
         "step 2:",
         "step 3:",
@@ -256,6 +328,42 @@ def _is_meta_line(line: str) -> bool:
         lowered,
         flags=re.IGNORECASE,
     ):
+        return True
+
+    if re.search(
+        r"\b(3-5\s+clear|most likely cause|likely cause|warning sign|professional care at the end|short acknowledgment)\b",
+        lowered,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if re.match(
+        r"^[*\-\s]*\d+\.\s*(acknowledge|3-5\s+clear|most likely cause|likely cause|warning sign|professional care)",
+        lowered,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if re.match(r"^[*\-\s]*\d+\.\s*steps?\s*:", lowered, flags=re.IGNORECASE):
+        return True
+
+    if re.match(
+        r"^[*\-\s]*\d+\.\s*(explain how to|get the best help from me|identify the\s+\"?cause\"?\s+as\s+a\s+test)",
+        lowered,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if "no analysis/planning" in lowered or "no labels" in lowered:
+        return True
+
+    if "applying a medical structure" in lowered or "test message" in lowered:
+        return True
+
+    if re.match(r"^[*\-\s]*\d+\.\s*(cause|warning)\s*:\s*n\/?a\.?$", lowered, flags=re.IGNORECASE):
+        return True
+
+    if lowered.startswith("example:"):
         return True
 
     if "no analysis" in lowered and "no labels" in lowered:
@@ -288,6 +396,20 @@ def _is_meta_line(line: str) -> bool:
         return True
 
     return False
+
+
+def _clean_user_facing_line(line: str) -> str:
+    cleaned = (line or "").strip()
+    if not cleaned:
+        return ""
+
+    # When models leak quoted final text as a markdown bullet, keep the text and drop wrappers.
+    if re.match(r'^[*\-]\s*["\'].+["\']\s*$', cleaned):
+        cleaned = re.sub(r'^[*\-]\s*', "", cleaned)
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
+            cleaned = cleaned[1:-1].strip()
+
+    return cleaned
 
 
 def _sanitize_model_response(text: str) -> str:
@@ -329,7 +451,10 @@ def _sanitize_model_response(text: str) -> str:
     for line in lines[start_idx:]:
         if _is_meta_line(line):
             continue
-        filtered_lines.append(line)
+        cleaned_line = _clean_user_facing_line(line)
+        if _is_meta_line(cleaned_line):
+            continue
+        filtered_lines.append(cleaned_line)
 
     # Remove leaked rubric bullets at the top when the actual answer follows.
     while filtered_lines:
@@ -341,6 +466,28 @@ def _sanitize_model_response(text: str) -> str:
             for ln in filtered_lines[1:]
         )
         if not has_non_bullet_after:
+            break
+        filtered_lines.pop(0)
+
+    # Drop leaked numbered planning/checklist lines.
+    while filtered_lines:
+        first = filtered_lines[0].strip()
+        if not re.match(
+            r"^\d+\.\s*(acknowledge|steps?:|3-5\s+clear|most likely cause|likely cause|warning sign|professional care|explain how to|get the best help from me|identify the\s+\"?cause\"?\s+as\s+a\s+test)",
+            first,
+            flags=re.IGNORECASE,
+        ):
+            break
+        filtered_lines.pop(0)
+
+    # Drop leaked numbered rubric lines that can survive prefix stripping.
+    while filtered_lines:
+        first = filtered_lines[0].strip()
+        if not re.match(
+            r"^\d+\.\s*(acknowledge|3-5\s+clear|most likely cause|likely cause|warning sign|professional care|no \"?i cannot\"?)",
+            first,
+            flags=re.IGNORECASE,
+        ):
             break
         filtered_lines.pop(0)
 
@@ -369,6 +516,7 @@ def process_medical_query(
     detected_language = _normalize_language_name(language)
     query_text = text_query or ""
     drug_context = ""
+    drug_metadata: Dict[str, object] = {}
     raw_response = ""
     model_latency_ms = 0
 
@@ -383,47 +531,47 @@ def process_medical_query(
             detected_language = _adjust_detected_language_from_transcript(detected_language, transcript)
 
         drug_context = drug_lookup.get_drug_context(query_text)
-        system_prompt = build_system_prompt(detected_language, drug_context)
+        drug_metadata = drug_lookup.get_drug_context_metadata(query_text)
 
-        if image_path:
-            user_message = f"[I am showing you an image: {image_path}]\n\n{query_text}"
+        if _looks_like_non_medical_test_query(query_text):
+            raw_response = _build_ready_response(detected_language)
+            model_latency_ms = 0
         else:
-            user_message = query_text
+            system_prompt = build_system_prompt(detected_language, drug_context)
 
-        infer_result = gemma_core.infer(
-            system_prompt,
-            user_message,
-            image_path,
-            max_tokens=VEDA_MAX_TOKENS,
-        )
-        raw_response = _sanitize_model_response(infer_result.response)
-        model_latency_ms = infer_result.latency_ms
+            if image_path:
+                user_message = f"[I am showing you an image: {image_path}]\n\n{query_text}"
+            else:
+                user_message = query_text
+
+            infer_result = gemma_core.infer(
+                system_prompt,
+                user_message,
+                image_path,
+                max_tokens=VEDA_MAX_TOKENS,
+            )
+            raw_response = _sanitize_model_response(infer_result.response)
+            model_latency_ms = infer_result.latency_ms
 
         image_context = f"Image: {image_path}" if image_path else "No image provided"
-        if model_latency_ms > SYNC_MIRROR_MAX_MODEL_MS:
-            mirror_report = mirror.MirrorReport(
-                confidence_score=70,
-                flags=["audit_deferred_for_latency"],
-                reasoning_trace=(
-                    "Synchronous MIRROR audit deferred because primary generation was slow "
-                    f"({model_latency_ms}ms)."
-                ),
-                verdict="warn",
-                audit_time_ms=0,
-            )
-        else:
-            mirror_report = mirror.audit(
-                query=query_text,
-                response=raw_response,
-                image_context=image_context,
-            )
+        routing_mode = (gemma_core.compute_router.get_status().get("mode") or "offline").strip().lower()
+        mirror_token_budget = (
+            MIRROR_AUDIT_MAX_TOKENS_OFFLINE
+            if routing_mode == "offline"
+            else MIRROR_AUDIT_MAX_TOKENS
+        )
+        mirror_report = mirror.audit(
+            query=query_text,
+            response=raw_response,
+            image_context=image_context,
+            max_tokens=mirror_token_budget,
+        )
         response_text = _sanitize_model_response(
             mirror.apply_verdict(raw_response, mirror_report, detected_language)
         )
         should_rewrite_language = (
             ENABLE_RESPONSE_LANGUAGE_REWRITE
             and (audio_path is None or ENABLE_VOICE_LANGUAGE_REWRITE)
-            and model_latency_ms <= LANGUAGE_REWRITE_MAX_PRIMARY_LATENCY_MS
         )
         if should_rewrite_language:
             response_text = _enforce_response_language(response_text, detected_language)
@@ -437,17 +585,28 @@ def process_medical_query(
     except Exception as exc:
         response_text = _safe_fallback_message(detected_language)
         raw_response = response_text
+        if not drug_metadata:
+            drug_metadata = {
+                "query": query_text,
+                "has_context": False,
+                "match_count": 0,
+                "matches": [],
+                "sources": [],
+                "live_lookup_enabled": False,
+                "live_fallback_used": False,
+            }
         mirror_report = mirror.MirrorReport(
-            confidence_score=0,
-            flags=["system_unavailable"],
-            reasoning_trace=str(exc),
-            verdict="warn",
+            confidence_score=10,
+            flags=["system_unavailable", "manual_escalation_required"],
+            reasoning_trace=f"Pipeline unavailable: {exc}",
+            verdict="block",
         )
 
     audio_response_path = ""
     if _should_generate_tts(audio_path):
         try:
-            audio_response_path = voice_utils.speak_to_file(_trim_for_tts(response_text))
+            # Keep spoken output aligned with the exact finalized user-facing answer.
+            audio_response_path = voice_utils.speak_to_file(response_text)
         except Exception:
             audio_response_path = ""
 
@@ -460,7 +619,9 @@ def process_medical_query(
         raw_response=raw_response,
         mirror_report=mirror_report,
         drug_context=drug_context,
+        drug_metadata=drug_metadata,
         audio_response_path=audio_response_path,
+        model_latency_ms=model_latency_ms,
         processing_time_ms=processing_time_ms,
         image_path=image_path or "",
     )

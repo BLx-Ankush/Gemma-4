@@ -12,7 +12,7 @@ MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "gemma4-e2b.gguf")
 MMPROJ_PATH = os.path.join(MODEL_DIR, "mmproj-gemma4-e2b.gguf")
 
-MAX_TOKENS = int(os.environ.get("AEGIS_MAX_TOKENS", "128"))
+MAX_TOKENS = int(os.environ.get("AEGIS_MAX_TOKENS", "256"))
 TEMPERATURE = 0.3
 
 _last_backend = "none"
@@ -120,7 +120,7 @@ def _get_local_config() -> Dict[str, Any]:
         "chat_path": os.environ.get("AEGIS_LOCAL_CHAT_PATH", "/v1/chat/completions"),
         "completion_path": os.environ.get("AEGIS_LOCAL_COMPLETION_PATH", "/completion"),
         "model_label": os.environ.get("AEGIS_LOCAL_MODEL_LABEL", "gemma4-e2b-turboquant"),
-        "timeout": max(1.0, min(timeout, 45.0)),
+        "timeout": max(5.0, min(timeout, 180.0)),
     }
 
 
@@ -168,6 +168,12 @@ def _safe_int_env(name: str, default: int, minimum: int = 0) -> int:
     except ValueError:
         value = default
     return max(minimum, value)
+
+
+def _clamp_token_budget(max_tokens: Optional[int]) -> int:
+    requested = int(max_tokens) if max_tokens else MAX_TOKENS
+    hard_cap = max(128, min(_safe_int_env("AEGIS_MAX_TOKENS_HARD_CAP", 384), 768))
+    return max(64, min(requested, hard_cap))
 
 
 def _get_cloud_failure_policy() -> Dict[str, Any]:
@@ -260,8 +266,7 @@ def _infer_local(
     config = _get_local_config()
     timeout = config["timeout"]
 
-    token_budget = int(max_tokens) if max_tokens else MAX_TOKENS
-    token_budget = max(32, min(token_budget, 192))
+    token_budget = _clamp_token_budget(max_tokens)
 
     chat_payload: Dict[str, Any] = {
         "model": config["model_label"],
@@ -358,8 +363,7 @@ def _infer_cloud(
     image_path: Optional[str] = None,
     max_tokens: Optional[int] = None,
 ) -> str:
-    token_budget = int(max_tokens) if max_tokens else MAX_TOKENS
-    token_budget = max(32, min(token_budget, 192))
+    token_budget = _clamp_token_budget(max_tokens)
 
     global _last_backend
     config = _get_cloud_config()
@@ -435,8 +439,7 @@ def infer(
     force_cloud: bool = False,
 ) -> InferResult:
     start_time = time.time()
-    effective_tokens = int(max_tokens) if max_tokens else MAX_TOKENS
-    effective_tokens = max(32, min(effective_tokens, 192))
+    effective_tokens = _clamp_token_budget(max_tokens)
     status = compute_router.get_status()
     has_vision = bool(image_path and os.path.exists(image_path or ""))
     online_cloud_mode = status["mode"] == "online" and _cloud_is_configured()
